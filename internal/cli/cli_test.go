@@ -314,12 +314,16 @@ func TestServiceImportRecursiveRequestConvertsLocalNPMSourceToAbsolutePath(t *te
 	if err := os.Chdir(tmp); err != nil {
 		t.Fatal(err)
 	}
+	absPkg, err := filepath.Abs("pkg")
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatal(err)
 		}
-		want := "npm:" + pkg
+		want := "npm:" + absPkg
 		if req["recursive"] != true || req["source"] != want {
 			t.Fatalf("unexpected recursive body: %+v want source %q", req, want)
 		}
@@ -350,14 +354,18 @@ func TestNormalizeImportSourcePreservesServiceRoot(t *testing.T) {
 	if err := os.Chdir(tmp); err != nil {
 		t.Fatal(err)
 	}
+	absPkg, err := filepath.Abs("pkg")
+	if err != nil {
+		t.Fatal(err)
+	}
 	gitSource := "https://user:p%40ss@example.com/acme/repo.git//svc@v1.0.0"
 	tests := []struct {
 		name   string
 		source string
 		want   string
 	}{
-		{name: "local service root", source: "./pkg//nested", want: pkg + "//nested"},
-		{name: "npm local service root", source: "npm:./pkg//nested", want: "npm:" + pkg + "//nested"},
+		{name: "local service root", source: "./pkg//nested", want: absPkg + "//nested"},
+		{name: "npm local service root", source: "npm:./pkg//nested", want: "npm:" + absPkg + "//nested"},
 		{name: "https git unchanged", source: gitSource, want: gitSource},
 	}
 	for _, tc := range tests {
@@ -391,13 +399,17 @@ func TestServiceImportRequestConvertsLocalSourceToAbsolutePath(t *testing.T) {
 	if err := os.Chdir(tmp); err != nil {
 		t.Fatal(err)
 	}
+	absSource, err := filepath.Abs("service.tgz")
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatal(err)
 		}
-		if req["source"] != source {
-			t.Fatalf("source=%q want %q", req["source"], source)
+		if req["source"] != absSource {
+			t.Fatalf("source=%q want %q", req["source"], absSource)
 		}
 		_, _ = fmt.Fprintln(w, `{"type":"complete","status":"ok","service":{"ID":"echo"},"restarted_instances":[],"restart_errors":[]}`)
 	}))
@@ -426,12 +438,16 @@ func TestServiceImportRequestConvertsLocalNPMSourceToAbsolutePath(t *testing.T) 
 	if err := os.Chdir(tmp); err != nil {
 		t.Fatal(err)
 	}
+	absPkg, err := filepath.Abs("pkg")
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatal(err)
 		}
-		want := "npm:" + pkg
+		want := "npm:" + absPkg
 		if req["source"] != want {
 			t.Fatalf("source=%q want %q", req["source"], want)
 		}
