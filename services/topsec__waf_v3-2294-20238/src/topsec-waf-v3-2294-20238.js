@@ -62,6 +62,11 @@ const str = (v) => {
   return String(v);
 };
 
+const toNum = (v, fallback) => {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
 const aesEncrypt = (key, plain) => {
   const block = 16;
   const pad = (block - plain.length % block) % block;
@@ -88,68 +93,128 @@ const readConfig = (ctx = {}) => {
 
 let session = null;
 
-async function login(host, username, password, skipTlsVerify = false) {
+function clearSession() { session = null; }
+
+async function login(host, username, password, skipTlsVerify = false, timeoutMs) {
   if (host.startsWith('https://') && skipTlsVerify) {
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
   }
 
-  const r1 = await fetch(host + '/api/v1/get_miks', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: '',
-  });
+  const fetchOpts = { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: '' };
+  if (timeoutMs) fetchOpts.signal = AbortSignal.timeout(timeoutMs);
+
+  let r1;
+  try {
+    r1 = await fetch(host + '/api/v1/get_miks', fetchOpts);
+  } catch (e) {
+    if (e.name === 'TimeoutError' || e.name === 'AbortError') throw grpcErr('DEADLINE_EXCEEDED', `get_miks timeout after ${timeoutMs}ms`);
+    throw grpcErr('UNAVAILABLE', `get_miks network error: ${e.message}`);
+  }
   if (!r1.ok) throw grpcErr('UNAVAILABLE', `get_miks failed: HTTP ${r1.status}`);
 
-  const key = Buffer.from(await r1.text(), 'base64');
+  const keyText = await r1.text();
+  let key;
+  try { key = Buffer.from(keyText, 'base64'); } catch { throw grpcErr('UNAVAILABLE', 'get_miks returned invalid base64 key'); }
+  if (key.length !== 16) throw grpcErr('UNAVAILABLE', `get_miks key length ${key.length}, expected 16`);
   const sc = r1.headers.getSetCookie?.()?.[0] ?? r1.headers.get('set-cookie') ?? '';
   const sid = sc.match(/PHPSESSID=([^;]+)/)?.[1] ?? '';
+  if (!sid) throw grpcErr('UNAUTHENTICATED', 'login failed: no PHPSESSID in get_miks response');
   const cookie = `PHPSESSID=${sid}`;
 
   const encPw = aesEncrypt(key, password);
   const loginBody = `name=${encodeURIComponent(username)}&password=${encodeURIComponent(encPw)}`;
 
-  const r2 = await fetch(host + '/api/v1/login', {
+  const loginOpts = {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': cookie },
     body: loginBody,
-  });
+  };
+  if (timeoutMs) loginOpts.signal = AbortSignal.timeout(timeoutMs);
+
+  let r2;
+  try {
+    r2 = await fetch(host + '/api/v1/login', loginOpts);
+  } catch (e) {
+    if (e.name === 'TimeoutError' || e.name === 'AbortError') throw grpcErr('DEADLINE_EXCEEDED', `login timeout after ${timeoutMs}ms`);
+    throw grpcErr('UNAVAILABLE', `login network error: ${e.message}`);
+  }
   const text = await r2.text();
-  if (r2.status === 401 || r2.status === 403) throw grpcErr('PERMISSION_DENIED', `login auth failed: HTTP ${r2.status}`);
+
+  // 401: wrong credentials → UNAUTHENTICATED
+  if (r2.status === 401) throw grpcErr('UNAUTHENTICATED', `login failed: incorrect username or password`);
+  // 403: account locked / forbidden → PERMISSION_DENIED
+  if (r2.status === 403) throw grpcErr('PERMISSION_DENIED', `login forbidden: HTTP ${r2.status}`);
   if (!r2.ok) throw grpcErr('UNAVAILABLE', `login failed: HTTP ${r2.status}`);
 
+  // Token format variations:
+  //   "ok?<token>"
+  //   "?[<token>}?"
+  //   "?[<token>}"
   const parts = text.split('?');
-  if (parts.length < 2 || !parts[1]) throw grpcErr('PERMISSION_DENIED', `login token missing: ${text}`);
-  const token = parts[1].replace(/^\[|}$/g, '');
+  if (parts.length < 2 || !parts[1]) throw grpcErr('UNAUTHENTICATED', `login token missing from response: ${text.substring(0, 80)}`);
+  const token = parts[1].replace(/^\[/, '').replace(/[}?]+$/, '');
 
   return { cookie, token };
 }
 
-async function getSession(host, username, password, skipTlsVerify) {
+async function getSession(host, username, password, skipTlsVerify, timeoutMs) {
   if (!session || session.host !== host || session.username !== username) {
-    const s = await login(host, username, password, skipTlsVerify);
+    const s = await login(host, username, password, skipTlsVerify, timeoutMs);
     session = { host, username, ...s };
   }
   return session;
 }
 
-async function callWaf(host, path, body, sess) {
-  const payload = JSON.stringify({ token: sess.token, commands: [body] });
+async function callWaf(host, path, body, sess, timeoutMs, extra = {}) {
+  const payload = JSON.stringify({ token: sess.token, commands: [body], ...extra });
 
-  const res = await fetch(host + path, {
+  const opts = {
     method: 'POST',
     headers: { 'Cookie': sess.cookie },
     body: payload,
-  });
+  };
+  if (timeoutMs) opts.signal = AbortSignal.timeout(timeoutMs);
+
+  let res;
+  try {
+    res = await fetch(host + path, opts);
+  } catch (e) {
+    if (e.name === 'TimeoutError' || e.name === 'AbortError') throw grpcErr('DEADLINE_EXCEEDED', `WAF request timeout after ${timeoutMs}ms`);
+    throw grpcErr('UNAVAILABLE', `WAF request failed: ${e.message}`);
+  }
 
   const text = await res.text();
-  if (res.status === 401 || res.status === 403) throw grpcErr('PERMISSION_DENIED', 'WAF auth expired');
-  if (res.status >= 400 && res.status < 500) throw grpcErr('FAILED_PRECONDITION', `WAF HTTP ${res.status}: ${text}`);
-  if (!res.ok) throw grpcErr('UNAVAILABLE', `WAF HTTP ${res.status}: ${text}`);
+
+  // Auth expired / invalid — clear cached session so next call re-logins
+  if (res.status === 401 || res.status === 403) {
+    clearSession();
+    throw grpcErr('PERMISSION_DENIED', 'WAF auth expired');
+  }
+
+  if (res.status >= 400 && res.status < 500) throw grpcErr('FAILED_PRECONDITION', `WAF HTTP ${res.status}: ${text.substring(0, 200)}`);
+  if (!res.ok) throw grpcErr('UNAVAILABLE', `WAF HTTP ${res.status}: ${text.substring(0, 200)}`);
 
   let json;
   try { json = JSON.parse(text); } catch { throw grpcErr('UNKNOWN', 'WAF response not JSON'); }
   if (json.result === 'failed') throw grpcErr('FAILED_PRECONDITION', json.info || 'WAF command failed');
   return json;
+}
+
+// Call WAF with automatic session retry on 401/403 auth expiry.
+// On first PERMISSION_DENIED: clears the cached session, re-logins, and retries once.
+async function callWafWithRetry(host, path, body, username, password, skipTlsVerify, timeoutMs, extra = {}) {
+  let sess = await getSession(host, username, password, skipTlsVerify, timeoutMs);
+  try {
+    return await callWaf(host, path, body, sess, timeoutMs, extra);
+  } catch (e) {
+    if (e.legacyCode === 'PERMISSION_DENIED') {
+      // Session may have expired — force re-login and retry exactly once
+      const newSess = await login(host, username, password, skipTlsVerify, timeoutMs);
+      session = { host, username, ...newSess };
+      return await callWaf(host, path, body, session, timeoutMs, extra);
+    }
+    throw e;
+  }
 }
 
 // ── URL policy helpers ──────────────────────────────────────────
@@ -162,7 +227,7 @@ const buildCondition = (url, operator = 'contains') => {
 // ── IP handlers ─────────────────────────────────────────────────
 
 async function handleAdd(ctx) {
-  const { host, username, password, skipTlsVerify } = readConfig(ctx);
+  const { host, username, password, skipTlsVerify, timeoutMs } = readConfig(ctx);
   const req = ctx.request ?? {};
 
   const name = str(first(req.name)).trim();
@@ -174,46 +239,46 @@ async function handleAdd(ctx) {
   const address = ips.map((s) => str(s).trim()).filter(Boolean).join('|');
   if (!address) throw grpcErr('INVALID_ARGUMENT', 'ip_addresses empty');
 
-  const sess = await getSession(host, username, password, skipTlsVerify);
-  const json = await callWaf(host, API_IP_ADD, { waf_ip_group_add: { name, address } }, sess);
+  const json = await callWafWithRetry(host, API_IP_ADD, { waf_ip_group_add: { name, address } }, username, password, skipTlsVerify, timeoutMs);
   return { result: str(json.result), info: str(json.info) };
 }
 
 async function handleDelete(ctx) {
-  const { host, username, password, skipTlsVerify } = readConfig(ctx);
+  const { host, username, password, skipTlsVerify, timeoutMs } = readConfig(ctx);
   const req = ctx.request ?? {};
 
   const name = str(first(req.name)).trim();
   if (!name) throw grpcErr('INVALID_ARGUMENT', 'name required');
 
-  const sess = await getSession(host, username, password, skipTlsVerify);
-  const json = await callWaf(host, API_IP_DEL, { waf_ip_group_delete: { name } }, sess);
+  const json = await callWafWithRetry(host, API_IP_DEL, { waf_ip_group_delete: { name } }, username, password, skipTlsVerify, timeoutMs);
   return { result: str(json.result), info: str(json.info) };
 }
 
 async function handleList(ctx) {
-  const { host, username, password, skipTlsVerify } = readConfig(ctx);
+  const { host, username, password, skipTlsVerify, timeoutMs } = readConfig(ctx);
   const req = ctx.request ?? {};
 
   const name = str(first(req.name)).trim();
+  const page = toNum(first(req.page), 1);
+  const rows = toNum(first(req.rows, req.page_size, req.pageSize), 20);
+
   const command = name ? { waf_ip_group_show: { name } } : { waf_ip_group_show: {} };
 
-  const sess = await getSession(host, username, password, skipTlsVerify);
-  const json = await callWaf(host, API_IP_SHOW, command, sess);
+  const json = await callWafWithRetry(host, API_IP_SHOW, command, username, password, skipTlsVerify, timeoutMs, { page, rows });
 
-  const rows = (json.rows || []).map((r) => ({
+  const mappedRows = (json.rows || []).map((r) => ({
     name: str(r.name),
     group_value: str(r.group_value),
     ip_group_members: str(r.ip_group_members),
     m_type: str(r.m_type),
   }));
-  return { rows, total: String(json.total ?? rows.length) };
+  return { rows: mappedRows, total: String(json.total ?? mappedRows.length) };
 }
 
 // ── URL handlers ─────────────────────────────────────────────────
 
 async function handleUrlBlock(ctx) {
-  const { host, username, password, skipTlsVerify } = readConfig(ctx);
+  const { host, username, password, skipTlsVerify, timeoutMs } = readConfig(ctx);
   const req = ctx.request ?? {};
 
   const policy = str(first(req.security_policy, req.securityPolicy)).trim();
@@ -227,6 +292,10 @@ async function handleUrlBlock(ctx) {
   const actionRaw = str(first(req.action, 'deny')).trim();
   const action = VALID_ACTIONS.includes(actionRaw) ? actionRaw : 'deny';
   const actionData = str(first(req.action_data, req.actionData)).trim();
+  // temp-redirect and perm-redirect require action_data (the redirect target URL)
+  if ((action === 'temp-redirect' || action === 'perm-redirect') && !actionData) {
+    throw grpcErr('INVALID_ARGUMENT', 'action_data required for temp-redirect and perm-redirect (redirect target URL)');
+  }
   const operator = str(first(req.operator, 'contains')).trim() || 'contains';
   const phase = str(first(req.phase, 'request_header')).trim() || 'request_header';
   const logMsg = str(first(req.log_message, req.logMessage, `block: ${url}`)).trim() || `block: ${url}`;
@@ -236,13 +305,12 @@ async function handleUrlBlock(ctx) {
   const cmd = { 'security-policy': policy, name, enable: 'on', phase, action, 'log-message': logMsg, condition };
   if (actionData) cmd['action-data'] = actionData;
 
-  const sess = await getSession(host, username, password, skipTlsVerify);
-  const json = await callWaf(host, API_URL_ADD, { 'waf_user_policy_ui_add': cmd }, sess);
+  const json = await callWafWithRetry(host, API_URL_ADD, { 'waf_user_policy_ui_add': cmd }, username, password, skipTlsVerify, timeoutMs);
   return { result: str(json.result), info: str(json.info) };
 }
 
 async function handleUrlUnblock(ctx) {
-  const { host, username, password, skipTlsVerify } = readConfig(ctx);
+  const { host, username, password, skipTlsVerify, timeoutMs } = readConfig(ctx);
   const req = ctx.request ?? {};
 
   const policy = str(first(req.security_policy, req.securityPolicy)).trim();
@@ -250,28 +318,28 @@ async function handleUrlUnblock(ctx) {
   const name = str(first(req.name)).trim();
   if (!name) throw grpcErr('INVALID_ARGUMENT', 'name required');
 
-  const sess = await getSession(host, username, password, skipTlsVerify);
-  const json = await callWaf(host, API_URL_DEL, {
+  const json = await callWafWithRetry(host, API_URL_DEL, {
     'waf_user_policy_delete': { 'security-policy': policy, name }
-  }, sess);
+  }, username, password, skipTlsVerify, timeoutMs);
   return { result: str(json.result), info: str(json.info) };
 }
 
 async function handleUrlList(ctx) {
-  const { host, username, password, skipTlsVerify } = readConfig(ctx);
+  const { host, username, password, skipTlsVerify, timeoutMs } = readConfig(ctx);
   const req = ctx.request ?? {};
 
   const policy = str(first(req.security_policy, req.securityPolicy)).trim();
   if (!policy) throw grpcErr('INVALID_ARGUMENT', 'security_policy required');
   const name = str(first(req.name)).trim();
+  const page = toNum(first(req.page), 1);
+  const rows = toNum(first(req.rows, req.page_size, req.pageSize), 20);
 
   const cmd = { 'security-policy': policy };
   if (name) cmd.name = name;
 
-  const sess = await getSession(host, username, password, skipTlsVerify);
-  const json = await callWaf(host, API_URL_SHOW, { 'waf_url_rewrite_show_name': cmd }, sess);
+  const json = await callWafWithRetry(host, API_URL_SHOW, { 'waf_url_rewrite_show_name': cmd }, username, password, skipTlsVerify, timeoutMs, { page, rows });
 
-  const rows = (json.rows || []).map((r) => ({
+  const mappedRows = (json.rows || []).map((r) => ({
     id: str(r.id),
     name: str(r.name),
     action: str(r.action),
@@ -280,11 +348,11 @@ async function handleUrlList(ctx) {
     log_message: str(r.log_message),
     conditions: str(r.conditions),
   }));
-  return { rows, total: String(json.total ?? rows.length) };
+  return { rows: mappedRows, total: String(json.total ?? mappedRows.length) };
 }
 
 async function handleUrlStatus(ctx) {
-  const { host, username, password, skipTlsVerify } = readConfig(ctx);
+  const { host, username, password, skipTlsVerify, timeoutMs } = readConfig(ctx);
   const req = ctx.request ?? {};
 
   const policy = str(first(req.security_policy, req.securityPolicy)).trim();
@@ -295,10 +363,9 @@ async function handleUrlStatus(ctx) {
   const enableRaw = str(first(req.enable, 'on')).trim().toLowerCase();
   const enable = ['on', 'off'].includes(enableRaw) ? enableRaw : 'on';
 
-  const sess = await getSession(host, username, password, skipTlsVerify);
-  const json = await callWaf(host, API_URL_MOD, {
+  const json = await callWafWithRetry(host, API_URL_MOD, {
     'waf_user_policy_modify_ui': { 'security-policy': policy, name, enable }
-  }, sess);
+  }, username, password, skipTlsVerify, timeoutMs);
   return { result: str(json.result), info: str(json.info) };
 }
 
@@ -332,7 +399,9 @@ export const _test = {
   grpcErr,
   first,
   str,
+  toNum,
   readConfig,
   buildCondition,
+  clearSession,
   resetSession: () => { session = null; },
 };

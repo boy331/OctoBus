@@ -39,6 +39,10 @@ message DeleteBlacklistIPResponse {
 message ListBlacklistIPsRequest {
   // 可选，按名称过滤；为空则列出全部
   string name = 1;
+  // 页码，从 1 开始，默认 1
+  int32 page = 2;
+  // 每页条数，默认 20
+  int32 rows = 3;
 }
 
 message IPGroupEntry {
@@ -82,6 +86,10 @@ message DeleteUrlBlockResponse {
 message ListUrlBlocksRequest {
   string security_policy = 1;
   string name = 2;
+  // 页码，从 1 开始，默认 1
+  int32 page = 3;
+  // 每页条数，默认 20
+  int32 rows = 4;
 }
 
 message UrlBlockEntry {

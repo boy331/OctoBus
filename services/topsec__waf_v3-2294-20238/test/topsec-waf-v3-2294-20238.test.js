@@ -60,6 +60,7 @@ test('internal helpers', async (t) => {
     assert.equal(_test.grpcCodeFor('UNAVAILABLE'), 14);
     assert.equal(_test.grpcCodeFor('FAILED_PRECONDITION'), 9);
     assert.equal(_test.grpcCodeFor('DEADLINE_EXCEEDED'), 4);
+    assert.equal(_test.grpcCodeFor('UNAUTHENTICATED'), 16);
     assert.equal(_test.grpcCodeFor('UNKNOWN_XYZ'), 2); // defaults to UNKNOWN
   });
 
@@ -83,18 +84,28 @@ test('internal helpers', async (t) => {
     assert.equal(_test.str(42), '42');
   });
 
+  await t.test('toNum returns fallback for invalid values', () => {
+    assert.equal(_test.toNum(undefined, 10), 10);
+    assert.equal(_test.toNum(null, 10), 10);
+    assert.equal(_test.toNum(0, 20), 20);
+    assert.equal(_test.toNum(-1, 20), 20);
+    assert.equal(_test.toNum(5, 20), 5);
+    assert.equal(_test.toNum('3', 20), 3);
+  });
+
   await t.test('readConfig requires host, username, password', () => {
     assert.throws(() => _test.readConfig({}), /host required/);
     assert.throws(() => _test.readConfig({ config: { host: 'http://x' }, secret: {} }), /username required/);
     assert.throws(() => _test.readConfig({ config: { host: 'http://x' }, secret: { username: 'u' } }), /password required/);
   });
 
-  await t.test('readConfig reads skipTlsVerify', () => {
+  await t.test('readConfig reads timeoutMs and skipTlsVerify', () => {
     const cfg = _test.readConfig({
-      config: { host: 'http://x' },
+      config: { host: 'http://x', timeoutMs: 3000 },
       secret: { username: 'u', password: 'p' },
       bindings: { skipTlsVerify: true },
     });
+    assert.equal(cfg.timeoutMs, 3000);
     assert.equal(cfg.skipTlsVerify, true);
   });
 
@@ -184,6 +195,29 @@ test('ListBlacklistIPs', async (t) => {
     assert.equal(result.rows.length, 1);
     assert.equal(result.rows[0].name, 'group1');
   });
+
+  await t.test('passes pagination params', async () => {
+    let lastBody = null;
+    mockFetch(async (url, init) => {
+      if (url.endsWith('/api/v1/get_miks')) return mockMiksResponse();
+      if (url.endsWith('/api/v1/login')) return mockLoginSuccess();
+      if (url.endsWith('/api/v1/ip_group_show')) {
+        lastBody = init.body;
+        return mockWafRows([], 0);
+      }
+      return new Response('{}', { status: 200 });
+    });
+
+    const { rpcdef } = await import('../src/topsec-waf-v3-2294-20238.js');
+    const handler = rpcdef(buildCtx({ page: 2, rows: 10 }))[listPath];
+    await handler();
+
+    const parsed = JSON.parse(lastBody);
+    assert.ok(parsed.commands[0].waf_ip_group_show, 'has ip show command');
+    // page/rows are at top level alongside commands, not inside command
+    assert.equal(parsed.page, 2);
+    assert.equal(parsed.rows, 10);
+  });
 });
 
 // ── URL Block handler tests ───────────────────────────────────────
@@ -238,6 +272,28 @@ test('AddUrlBlock', async (t) => {
     }))[urlAddPath];
     const result = await handler();
     assert.equal(result.result, 'ok');
+  });
+
+  await t.test('rejects redirect without action_data', async () => {
+    const { rpcdef } = await import('../src/topsec-waf-v3-2294-20238.js');
+    const handler = rpcdef(buildCtx({
+      security_policy: 'p',
+      name: 'x',
+      url: '/test',
+      action: 'temp-redirect',
+    }))[urlAddPath];
+    await assert.rejects(handler, /action_data required/);
+  });
+
+  await t.test('rejects perm-redirect without action_data', async () => {
+    const { rpcdef } = await import('../src/topsec-waf-v3-2294-20238.js');
+    const handler = rpcdef(buildCtx({
+      security_policy: 'p',
+      name: 'x',
+      url: '/test',
+      action: 'perm-redirect',
+    }))[urlAddPath];
+    await assert.rejects(handler, /action_data required/);
   });
 });
 
@@ -314,9 +370,50 @@ test('SetUrlBlockStatus', async (t) => {
   });
 });
 
+// ── session retry on 401 ──────────────────────────────────────────
+
+test('session retry: WAF 401 triggers re-login and retry', async () => {
+  const { _test } = await import('../src/topsec-waf-v3-2294-20238.js');
+  _test.resetSession();
+
+  let loginCount = 0;
+  mockFetch(async (url) => {
+    if (url.endsWith('/api/v1/get_miks')) return mockMiksResponse();
+    if (url.endsWith('/api/v1/login')) {
+      loginCount++;
+      return mockLoginSuccess();
+    }
+    if (url.endsWith('/api/v1/ip_group_show')) {
+      // First call: 401 (session expired)
+      // Second call (after re-login): success
+      if (loginCount < 2) {
+        return new Response(JSON.stringify({ result: 'failed' }), {
+          status: 401,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return mockWafRows([{ name: 'ok', group_value: '', ip_group_members: '', m_type: '' }]);
+    }
+    return new Response('{}', { status: 200 });
+  });
+
+  const { rpcdef } = await import('../src/topsec-waf-v3-2294-20238.js');
+  const handler = rpcdef(buildCtx({}))[listPath];
+  const result = await handler();
+
+  assert.equal(loginCount, 2, 'login called twice (initial + retry)');
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0].name, 'ok');
+  _test.resetSession();
+});
+
 // ── error handling tests ──────────────────────────────────────────
 
 test('error: WAF auth expired returns PERMISSION_DENIED', async () => {
+  const { _test } = await import('../src/topsec-waf-v3-2294-20238.js');
+  _test.resetSession();
+
+  // Both calls return 401 → retry exhausted, throws PERMISSION_DENIED
   mockFetch(async (url) => {
     if (url.endsWith('/api/v1/get_miks')) return mockMiksResponse();
     if (url.endsWith('/api/v1/login')) return mockLoginSuccess();
@@ -332,6 +429,7 @@ test('error: WAF auth expired returns PERMISSION_DENIED', async () => {
   const { rpcdef } = await import('../src/topsec-waf-v3-2294-20238.js');
   const handler = rpcdef(buildCtx({}))[listPath];
   await assert.rejects(handler, /PERMISSION_DENIED/);
+  _test.resetSession();
 });
 
 test('error: WAF 500 returns UNAVAILABLE', async () => {
@@ -385,27 +483,71 @@ test('error: WAF command failed returns FAILED_PRECONDITION', async () => {
   await assert.rejects(handler, /FAILED_PRECONDITION/);
 });
 
-test('error: login 401 returns PERMISSION_DENIED', async () => {
+test('error: login 401 returns UNAUTHENTICATED', async () => {
   const { _test } = await import('../src/topsec-waf-v3-2294-20238.js');
-  _test.resetSession(); // ensure fresh session
+  _test.resetSession();
 
   mockFetch(async (url) => {
     if (url.endsWith('/api/v1/get_miks')) return mockMiksResponse();
     if (url.endsWith('/api/v1/login')) {
-      return new Response('forbidden', { status: 401 });
+      return new Response('Incorrect username or password', { status: 401 });
     }
     return new Response('{}', { status: 200 });
   });
 
   const { rpcdef } = await import('../src/topsec-waf-v3-2294-20238.js');
-  // use different credentials to avoid session cache from prior tests
   const ctx = {
     config: { host: 'http://localhost:28080' },
     secret: { username: 'baduser', password: 'wrong' },
-    bindings: {},
+  };
+  const handler = rpcdef(ctx)[listPath];
+  await assert.rejects(handler, /UNAUTHENTICATED/);
+  _test.resetSession();
+});
+
+test('error: login 403 returns PERMISSION_DENIED', async () => {
+  const { _test } = await import('../src/topsec-waf-v3-2294-20238.js');
+  _test.resetSession();
+
+  mockFetch(async (url) => {
+    if (url.endsWith('/api/v1/get_miks')) return mockMiksResponse();
+    if (url.endsWith('/api/v1/login')) {
+      return new Response('forbidden', { status: 403 });
+    }
+    return new Response('{}', { status: 200 });
+  });
+
+  const { rpcdef } = await import('../src/topsec-waf-v3-2294-20238.js');
+  const ctx = {
+    config: { host: 'http://localhost:28080' },
+    secret: { username: 'locked', password: 'test' },
   };
   const handler = rpcdef(ctx)[listPath];
   await assert.rejects(handler, /PERMISSION_DENIED/);
+  _test.resetSession();
+});
+
+test('error: fetch timeout returns DEADLINE_EXCEEDED', async () => {
+  const { _test } = await import('../src/topsec-waf-v3-2294-20238.js');
+  _test.resetSession();
+
+  mockFetch(async (url) => {
+    if (url.endsWith('/api/v1/get_miks')) {
+      // Simulate timeout
+      const err = new Error('The operation was aborted');
+      err.name = 'TimeoutError';
+      throw err;
+    }
+    return new Response('{}', { status: 200 });
+  });
+
+  const { rpcdef } = await import('../src/topsec-waf-v3-2294-20238.js');
+  const ctx = {
+    config: { host: 'http://localhost:28080', timeoutMs: 100 },
+    secret: { username: 'admin', password: 'test123' },
+  };
+  const handler = rpcdef(ctx)[listPath];
+  await assert.rejects(handler, /DEADLINE_EXCEEDED/);
   _test.resetSession();
 });
 
