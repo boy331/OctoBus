@@ -133,6 +133,10 @@ const services = {
     entryFile: "../threatbook__tip_v4/bin/threatbook-tip-v4.js",
     serviceModule: "../threatbook__tip_v4/src/service.js",
   },
+  "topsec-waf": {
+    entryFile: "../topsec__waf/bin/topsec-waf.js",
+    serviceModule: "../topsec__waf/src/service.js",
+  },
   "topsec-fw-2u": {
     entryFile: "../topsec__fw-2u/bin/topsec-fw-2u.js",
     serviceModule: "../topsec__fw-2u/src/service.js",
