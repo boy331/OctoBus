@@ -9,6 +9,9 @@
   <a href="./CONTRIBUTING.zh-CN.md">
     <img src="https://img.shields.io/badge/贡献者-指南-blue" alt="contributing">
   </a>
+  <a href="./SECURITY.zh-CN.md">
+    <img src="https://img.shields.io/badge/安全合规-反馈-blue" alt="security">
+  </a>
 </p>
 
 ---

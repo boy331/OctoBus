@@ -9,6 +9,9 @@
   <a href="./CONTRIBUTING.md">
     <img src="https://img.shields.io/badge/Contributing-Guide-blue" alt="contributing">
   </a>
+  <a href="./SECURITY.md">
+    <img src="https://img.shields.io/badge/Security-Feedback-blue" alt="security">
+  </a>
 </p>
 
 ---
