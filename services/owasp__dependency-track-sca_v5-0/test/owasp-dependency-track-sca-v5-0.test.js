@@ -313,3 +313,46 @@ test('upstream HTTP errors include status and raw body', async () => {
     return true;
   });
 });
+
+test('missing API key remains an INVALID_ARGUMENT validation error', async () => {
+  let fetchCalled = false;
+  setFetch(async () => {
+    fetchCalled = true;
+    return jsonResponse(200, []);
+  });
+
+  const handler = await loadHandler(listProjectsPath, {}, {
+    bindings: { dependency_track_api_key: '' },
+  });
+  await assert.rejects(async () => handler(), (err) => {
+    assert.match(err.message, /dependency_track_api_key is required/);
+    assert.doesNotMatch(err.message, /dependency-track upstream request failed/);
+    assert.equal(fetchCalled, false);
+    return true;
+  });
+});
+
+test('timeout remains active while reading response body', async () => {
+  let capturedSignal;
+  setFetch(async (url, init) => {
+    capturedSignal = init.signal;
+    return {
+      status: 200,
+      headers: {},
+      text: async () => new Promise((resolve, reject) => {
+        capturedSignal.addEventListener('abort', () => reject(new Error('body read aborted')), { once: true });
+        setTimeout(() => resolve('{"late":true}'), 50);
+      }),
+    };
+  });
+
+  const handler = await loadHandler(listProjectsPath, {}, {
+    limits: { timeoutMs: 5 },
+  });
+  await assert.rejects(async () => handler(), (err) => {
+    assert.match(err.message, /dependency-track upstream response read failed/);
+    assert.match(err.message, /body read aborted/);
+    assert.equal(capturedSignal.aborted, true);
+    return true;
+  });
+});

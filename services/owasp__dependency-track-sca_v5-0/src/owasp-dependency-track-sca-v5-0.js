@@ -266,35 +266,30 @@ const buildRequestHeaders = (ctx = {}, contentType) => {
 const fetchUpstream = async (url, ctx = {}, options = {}) => {
   const bindings = ctx.bindings || {};
   assertSupportedTlsConfig(bindings);
+  const headers = buildRequestHeaders(ctx, options.contentType);
   const timeout = makeTimeoutSignal(resolveTimeoutMs(ctx));
   let res;
+  let httpStatus = 0;
+  let rawBody;
   try {
     res = await fetch(url, {
       method: options.method || 'GET',
-      headers: buildRequestHeaders(ctx, options.contentType),
+      headers,
       body: options.body,
       signal: timeout.signal,
     });
+    httpStatus = Number(res?.status || 0);
+    rawBody = await res.text();
   } catch (err) {
-    throwStructuredError('UNAVAILABLE', 'dependency-track upstream request failed', {
-      httpStatus: 0,
+    throwStructuredError('UNAVAILABLE', httpStatus
+      ? 'dependency-track upstream response read failed'
+      : 'dependency-track upstream request failed', {
+      httpStatus,
       rawBody: '',
-      reason: err?.cause?.message || err?.message || 'fetch failed',
+      reason: err?.cause?.message || err?.message || (httpStatus ? 'response read failed' : 'fetch failed'),
     });
   } finally {
     timeout.clear();
-  }
-
-  const httpStatus = Number(res?.status || 0);
-  let rawBody;
-  try {
-    rawBody = await res.text();
-  } catch (err) {
-    throwStructuredError('UNAVAILABLE', 'dependency-track upstream response read failed', {
-      httpStatus,
-      rawBody: '',
-      reason: err?.message || 'response read failed',
-    });
   }
   return {
     httpStatus,
