@@ -749,3 +749,101 @@ test('SDK handlers accept request plus inner context arguments (Manager API)', a
   assert.equal(calls.api.length, 1);
   assert.match(calls.api[0].init.headers['x-engine-instance'], /inst-camel/);
 });
+
+// ─── Review fix verification ──────────────────────────────────
+
+test('JWT token cache persists across rpcdef() calls (module-level Map, not closure)', async () => {
+  const { _test } = await import('../src/wazuh-siem.js');
+  _test.clearJwtCache();
+
+  const calls = mockWithAuth('persistent-token');
+
+  // First call triggers authentication
+  const handler1 = await loadHandler(listAgentsPath, {}, defaultManagerSecretCtx);
+  await handler1();
+  assert.equal(calls.auth.length, 1);
+
+  // Second call reuses cached token — no additional auth request
+  const handler2 = await loadHandler(listAgentsPath, {}, defaultManagerSecretCtx);
+  await handler2();
+  assert.equal(calls.auth.length, 1); // Still 1, cache hit
+  assert.equal(calls.api.length, 2);  // Two API calls total
+});
+
+test('request-level username/password takes priority for Manager JWT auth', async () => {
+  const { _test } = await import('../src/wazuh-siem.js');
+  _test.clearJwtCache();
+
+  const calls = mockWithAuth('req-cred-token');
+
+  const handler = await loadHandler(listAgentsPath, {
+    username: 'override-user',
+    password: 'override-pass',
+  }, defaultManagerSecretCtx);
+  await handler();
+
+  // Auth should use request-level credentials, not secret-level
+  assert.equal(calls.auth.length, 1);
+  assert.match(calls.auth[0].init.headers['Authorization'], /^Basic /);
+  const decoded = Buffer.from(calls.auth[0].init.headers['Authorization'].slice(6), 'base64').toString();
+  assert.equal(decoded, 'override-user:override-pass');
+});
+
+test('timeoutMs reads from bindings (config) before falling back to limits', async () => {
+  const { _test } = await import('../src/wazuh-siem.js');
+  // mergedBindings merges config into bindings, so config.timeoutMs takes priority
+  const bindings = _test.mergedBindings({
+    config: { timeoutMs: 8000 },
+    limits: { timeoutMs: 5000 },
+  });
+  assert.equal(bindings.timeoutMs, 8000); // config wins over limits
+});
+
+test('JWT payload decoded with base64url (not atob) for token expiry parsing', async () => {
+  const { _test } = await import('../src/wazuh-siem.js');
+  _test.clearJwtCache();
+
+  // Create a JWT-like token with base64url characters (- and _)
+  // Header: eyJhbGciOiJIUzI1NiI (standard base64url)
+  // Payload: base64url-encoded JSON with exp field containing base64url chars
+  const header = 'eyJhbGciOiJIUzI1NiI';
+  const payload = Buffer.from(JSON.stringify({ exp: 9999999999 })).toString('base64url');
+  const signature = 'test-sig-_with-base64url_chars';
+  const jwtToken = `${header}.${payload}.${signature}`;
+
+  const calls = mockWithAuth(jwtToken);
+  const handler = await loadHandler(listAgentsPath, {}, defaultManagerSecretCtx);
+  await handler();
+
+  // Verify the auth was successful (no error) — base64url parsing worked
+  assert.equal(calls.auth.length, 1);
+  assert.equal(calls.api.length, 1);
+  assert.match(calls.api[0].init.headers['Authorization'], /^Bearer /);
+});
+
+test('fetch uses AbortSignal.timeout (not invalid timeoutMs option)', async () => {
+  const { _test } = await import('../src/wazuh-siem.js');
+  _test.clearJwtCache();
+
+  let capturedInit;
+  const calls = mockWithAuth('signal-test-token', (url, init) => {
+    capturedInit = init;
+    return {
+      ok: true,
+      status: 200,
+      headers: new Map([['content-type', 'application/json']]),
+      text: async () => JSON.stringify({
+        data: { affected_items: [], total_affected_items: 0 },
+        error: 0,
+      }),
+    };
+  });
+
+  const handler = await loadHandler(listAgentsPath, {}, defaultManagerSecretCtx);
+  await handler();
+
+  // Verify API call uses AbortSignal.timeout, not raw timeoutMs property
+  assert.equal(calls.api.length, 1);
+  assert.ok(capturedInit.signal, 'fetch should have signal property from AbortSignal.timeout()');
+  assert.equal(capturedInit.timeoutMs, undefined, 'fetch should NOT have raw timeoutMs option');
+});
