@@ -45,8 +45,7 @@ const STATUS = {
 
 function mapError(error) {
   if (error instanceof HermesClientError) {
-    const suffix = error.details?.evidence ? `\n\n${error.details.evidence}` : "";
-    return new GrpcError(STATUS[error.code] || grpcStatus.UNKNOWN, `${error.message}${suffix}`);
+    return new GrpcError(STATUS[error.code] || grpcStatus.UNKNOWN, error.message);
   }
   return new GrpcError(grpcStatus.UNKNOWN, error?.message || String(error));
 }

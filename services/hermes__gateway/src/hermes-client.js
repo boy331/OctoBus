@@ -1,7 +1,9 @@
 import { createHmac } from "node:crypto";
+import { Agent, fetch } from "undici";
 
 const DEFAULT_TIMEOUT_MS = 10000;
 const MAX_BODY_BYTES = 1024 * 1024;
+let insecureDispatcher;
 
 export class HermesClientError extends Error {
   constructor(code, message, details = {}) {
@@ -118,14 +120,28 @@ function buildEvidence({ method, url, requestHeaders, requestBody, statusCode, s
   ].join("\n");
 }
 
+function buildFetchOptions({ method, headers, requestBody, signal, skipTlsVerify }) {
+  const options = {
+    method,
+    headers,
+    body: requestBody || undefined,
+    signal,
+  };
+  if (skipTlsVerify) {
+    insecureDispatcher ??= new Agent({
+      connect: {
+        rejectUnauthorized: false,
+      },
+    });
+    options.dispatcher = insecureDispatcher;
+  }
+  return options;
+}
+
 export async function callHermes({ config = {}, secret = {}, method, path, body, headers = {}, timeout }) {
   const baseUrl = normalizeBaseUrl(config.baseUrl);
   const finalPath = normalizePath(path);
   assertAllowedPath(finalPath, [config.healthPath, config.defaultPath, ...(config.allowedPaths || [])]);
-
-  if (config.skipTlsVerify && baseUrl.startsWith("https://")) {
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-  }
 
   const url = `${baseUrl}${finalPath}`;
   const requestBody = body === undefined ? "" : JSON.stringify(body);
@@ -146,12 +162,13 @@ export async function callHermes({ config = {}, secret = {}, method, path, body,
   let response;
   let responseBody = "";
   try {
-    response = await fetch(url, {
+    response = await fetch(url, buildFetchOptions({
       method,
       headers: finalHeaders,
-      body: requestBody || undefined,
+      requestBody,
       signal: controller.signal,
-    });
+      skipTlsVerify: Boolean(config.skipTlsVerify && baseUrl.startsWith("https://")),
+    }));
     responseBody = truncateBody(await response.text());
   } catch (error) {
     const code = error?.name === "AbortError" ? "DEADLINE_EXCEEDED" : "UNAVAILABLE";

@@ -19,6 +19,7 @@ import {
   testWebhookSubscription,
 } from "../src/hermes-cli.js";
 import { sendWebhook } from "../src/hermes-client.js";
+import { handlers } from "../src/service.js";
 
 let server;
 let baseUrl;
@@ -33,6 +34,11 @@ before(async () => {
     });
     req.on("end", () => {
       lastRequest = { method: req.method, url: req.url, headers: req.headers, body };
+      if (req.url === "/api/error") {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "upstream failed" }));
+        return;
+      }
       if (req.url !== "/api/webhooks/pgs-confirm") {
         res.writeHead(404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "not found" }));
@@ -128,6 +134,56 @@ test("SendWebhook rejects paths outside config.allowedPaths", async () => {
         },
       }),
     /not in config\.allowedPaths/,
+  );
+});
+
+test("SendWebhook skipTlsVerify does not change process-wide TLS verification", async () => {
+  const original = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = "1";
+  try {
+    await assert.rejects(
+      () =>
+        sendWebhook({
+          config: {
+            baseUrl: "https://127.0.0.1:1",
+            defaultPath: "/api/webhooks/pgs-confirm",
+            allowedPaths: ["/api/webhooks/*"],
+            skipTlsVerify: true,
+            timeoutMs: 1000,
+          },
+          request: {
+            payloadJson: "{}",
+          },
+        }),
+      /fetch failed|request failed|connect|ECONNREFUSED/i,
+    );
+    assert.equal(process.env.NODE_TLS_REJECT_UNAUTHORIZED, "1");
+  } finally {
+    if (original === undefined) {
+      delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+    } else {
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = original;
+    }
+  }
+});
+
+test("service errors do not expose HTTP evidence in gRPC messages", async () => {
+  await assert.rejects(
+    () =>
+      handlers["hermes.v1.HermesGateway/HealthCheck"]({
+        config: {
+          baseUrl,
+          healthPath: "/api/error",
+          allowedPaths: ["/api/*"],
+        },
+        request: {},
+      }),
+    (error) => {
+      assert.equal(error.message, "{\"error\":\"upstream failed\"}");
+      assert.doesNotMatch(error.message, /# Request/);
+      assert.doesNotMatch(error.message, /# Response/);
+      return true;
+    },
   );
 });
 
