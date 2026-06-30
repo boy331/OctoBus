@@ -69,6 +69,10 @@ const services = {
     entryFile: "../fortinet__waf/bin/fortinet-waf.js",
     serviceModule: "../fortinet__waf/src/service.js",
   },
+  "hermes-gateway": {
+    entryFile: "../hermes__gateway/bin/hermes-gateway.js",
+    serviceModule: "../hermes__gateway/src/service.js",
+  },
   "hillstone-fw-v5-5-r10": {
     entryFile: "../hillstone__fw_v5-5-r10/bin/hillstone-fw-v5-5-r10.js",
     serviceModule: "../hillstone__fw_v5-5-r10/src/service.js",
