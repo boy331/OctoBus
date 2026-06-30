@@ -27,7 +27,7 @@ function fixture() {
   writeJSON(path.join(root, "package.json"), {
     name: "@chaitin-ai/octobus-tentacles",
     dependencies: {
-      "@chaitin-ai/octobus-sdk": "^0.5.0",
+      "@chaitin-ai/octobus-sdk": "^0.6.0",
       commander: "^12.1.0",
     },
     bundledDependencies: [
@@ -128,7 +128,7 @@ test("allows numeric service package names", () => {
   writeJSON(path.join(root, "package.json"), {
     name: "@chaitin-ai/octobus-tentacles",
     dependencies: {
-      "@chaitin-ai/octobus-sdk": "^0.5.0",
+      "@chaitin-ai/octobus-sdk": "^0.6.0",
       commander: "^12.1.0",
     },
     bundledDependencies: [
@@ -270,7 +270,7 @@ test("reports missing root dispatcher metadata and wrapper entryFile handling", 
   writeJSON(path.join(root, "package.json"), {
     name: "@chaitin-ai/octobus-tentacles",
     dependencies: {
-      "@chaitin-ai/octobus-sdk": "^0.5.0",
+      "@chaitin-ai/octobus-sdk": "^0.6.0",
     },
     bundledDependencies: [
       "@chaitin-ai/octobus-sdk",
@@ -302,7 +302,7 @@ test("reports package files omissions for service roots and wrappers", () => {
   writeJSON(path.join(root, "package.json"), {
     name: "@chaitin-ai/octobus-tentacles",
     dependencies: {
-      "@chaitin-ai/octobus-sdk": "^0.5.0",
+      "@chaitin-ai/octobus-sdk": "^0.6.0",
       commander: "^12.1.0",
     },
     bundledDependencies: [
