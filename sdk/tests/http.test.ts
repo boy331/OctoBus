@@ -58,6 +58,11 @@ describe("service error helpers", () => {
     });
   });
 
+  it("redacts quoted sensitive key assignments in strings", () => {
+    expect(redactSensitive('"token"="abc"')).toBe('"token"="***"');
+    expect(redactSensitive("'api_key':'secret'")).toBe("'api_key':'***'");
+  });
+
   it("builds safe HTTP summaries and service errors", () => {
     const summary = safeErrorSummary(
       { status: 500, statusText: "Server Error" },
