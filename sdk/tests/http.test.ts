@@ -73,6 +73,17 @@ describe("service error helpers", () => {
     expect(missingSecretError("apiKey").legacyCode).toBe("UNAUTHENTICATED");
     expect(httpStatusError({ status: 404 }, "not found").legacyCode).toBe("NOT_FOUND");
   });
+
+  it("redacts quoted JSON secrets in HTTP summaries", () => {
+    const summary = safeErrorSummary(
+      { status: 401 },
+      '{"token":"abc","message":"failed","nested":{"api_key":"secret value"}}',
+    );
+
+    expect(summary.bodySnippet).toBe('{"token":"***","message":"failed","nested":{"api_key":"***"}}');
+    expect(summary.bodySnippet).not.toContain("abc");
+    expect(summary.bodySnippet).not.toContain("secret value");
+  });
 });
 
 describe("HTTP helpers", () => {

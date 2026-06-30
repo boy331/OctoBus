@@ -73,7 +73,7 @@ const CODE_TO_STATUS: Record<ServiceErrorCode, number> = {
 };
 
 const SENSITIVE_KEY_RE = /(?:authorization|cookie|password|passwd|secret|token|api[_-]?key|access[_-]?key|webhook|signature)/i;
-const SENSITIVE_ASSIGNMENT_RE = /((?:authorization|cookie|password|passwd|secret|token|api[_-]?key|access[_-]?key|webhook|signature)\s*[=:]\s*)[^\s,&;"}]+/gi;
+const SENSITIVE_ASSIGNMENT_RE = /((?:["'])?(?:authorization|cookie|password|passwd|secret|token|api[_-]?key|access[_-]?key|webhook|signature)(?:["'])?\s*[=:]\s*(?:["'])?)[^\s,&;"}']+/gi;
 const WEBHOOK_URL_RE = /\bhttps?:\/\/[^\s"'<>]*(?:webhook|hooks?)[^\s"'<>]*/gi;
 const AUTH_HEADER_RE = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi;
 
@@ -126,11 +126,27 @@ export function missingSecretError(field = "secret"): GrpcError {
 }
 
 function redactString(value: string): string {
+  const json = redactJsonString(value);
+  if (json !== undefined) {
+    return json;
+  }
   return value
     .replace(AUTH_HEADER_RE, "$1 ***")
     .replace(WEBHOOK_URL_RE, "[REDACTED_URL]")
     .replace(SENSITIVE_ASSIGNMENT_RE, "$1***")
     .replace(/\*{3}(?:\s+\*{3})+/g, "***");
+}
+
+function redactJsonString(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed || (trimmed[0] !== "{" && trimmed[0] !== "[")) {
+    return undefined;
+  }
+  try {
+    return JSON.stringify(redactSensitive(JSON.parse(trimmed)));
+  } catch {
+    return undefined;
+  }
 }
 
 export function redactSensitive(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
