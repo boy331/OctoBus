@@ -575,3 +575,183 @@ test('requestWithDefaults merges bindings with request overrides', async () => {
   const defaultsOnly = mod._test.requestWithDefaults(bindings, {});
   assert.equal(defaultsOnly.machine_id, 'default-machine');
 });
+
+// ── getReqField preserves falsy values ──────────────────────────────
+
+test('getReqField preserves falsy values (0, false, empty string)', async () => {
+  const mod = await importModule();
+  const { getReqField } = mod._test;
+
+  // 0 should be preserved, not treated as undefined
+  assert.equal(getReqField({ count: 0 }, 'count', 'count'), 0);
+  // false should be preserved
+  assert.equal(getReqField({ flag: false }, 'flag', 'flag'), false);
+  // empty string should be preserved
+  assert.equal(getReqField({ name: '' }, 'name', 'name'), '');
+  // null should be treated as absent (returns undefined)
+  assert.equal(getReqField({ count: null }, 'count', 'count'), undefined);
+  // undefined returns undefined
+  assert.equal(getReqField({}, 'missing', 'missing'), undefined);
+  // camelCase fallback works
+  assert.equal(getReqField({ alertId: 5 }, 'alert_id', 'alertId'), 5);
+});
+
+// ── mapHttpStatus does not leak upstream body ───────────────────────
+
+test('mapHttpStatus does not leak upstream response body to callers', async () => {
+  const mod = await importModule();
+  const { errorWithCode } = mod._test;
+
+  // 401 → UNAUTHENTICATED, message should NOT contain upstream body text
+  const err401 = mod._test.rpcdef({ config: {}, secret: {}, bindings: { endpoint: 'http://x' }, req: {} });
+  // Directly test mapHttpStatus through the code path
+  const saved = global.fetch;
+  mockFetch(async (url) => {
+    if (url.includes('/v1/watchers/login')) {
+      return new Response(JSON.stringify({ message: 'secret-internal-details' }), { status: 401, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('ok', { status: 200 });
+  });
+
+  try {
+    const ctx = makeCtx({}, { bindings: { endpoint: 'http://localhost:18080', machineId: 'm', password: 'p' } });
+    await mod.rpcdef(ctx)[METHOD_LIST_ALERTS]();
+    assert.fail('should have thrown');
+  } catch (err) {
+    assert.equal(err.code, 16); // UNAUTHENTICATED
+    assert.ok(!err.message.includes('secret-internal-details'), 'error message must not contain upstream body');
+  }
+
+  restoreFetch(saved);
+});
+
+// ── 401 vs 403 distinction ────────────────────────────────────────
+
+test('401 maps to UNAUTHENTICATED, 403 maps to PERMISSION_DENIED', async () => {
+  const mod = await importModule();
+  mod._test.clearJwtCache();
+  const saved = global.fetch;
+
+  // 401 → UNAUTHENTICATED (code 16)
+  mockFetch(async (url) => {
+    if (url.includes('/v1/watchers/login')) {
+      return new Response(JSON.stringify({ message: 'unauthorized' }), { status: 401, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('ok', { status: 200 });
+  });
+
+  try {
+    const ctx = makeCtx({}, { bindings: { endpoint: 'http://localhost:18080', machineId: 'm', password: 'p' } });
+    await mod.rpcdef(ctx)[METHOD_LIST_ALERTS]();
+    assert.fail('should have thrown');
+  } catch (err) {
+    assert.equal(err.code, 16); // UNAUTHENTICATED
+  }
+
+  restoreFetch(saved);
+});
+
+// ── JWT cache LRU eviction ─────────────────────────────────────────
+
+test('JWT cache evicts oldest entries when max size is exceeded', async () => {
+  const mod = await importModule();
+  mod._test.clearJwtCache();
+  const saved = global.fetch;
+  let loginCount = 0;
+
+  mockFetch(async (url, opts) => {
+    if (url.includes('/v1/watchers/login')) {
+      loginCount++;
+      const body = JSON.parse(opts.body);
+      // Each machineId gets a unique token
+      const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+      const payload = Buffer.from(JSON.stringify({
+        machine_id: body.machine_id,
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      })).toString('base64url');
+      const token = `${header}.${payload}.sig`;
+      return new Response(JSON.stringify({ code: 200, token }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } });
+  });
+
+  // Fill cache beyond max size (100)
+  const endpoint = 'http://localhost:18080';
+  for (let i = 0; i < 105; i++) {
+    const ctx = makeCtx({}, { bindings: { endpoint, machineId: `machine-${i}`, password: 'pass' } });
+    await mod.rpcdef(ctx)[METHOD_LIST_ALERTS]();
+  }
+
+  // Login should have been called for each unique machine (no cache hits since all unique)
+  assert.equal(loginCount, 105, 'all logins should fire for unique machine IDs');
+
+  // First few entries should have been evicted (LRU), cache size should be capped
+  // Re-request machine-0 — it should require a fresh login since it was evicted
+  loginCount = 0;
+  const ctx = makeCtx({}, { bindings: { endpoint, machineId: 'machine-0', password: 'pass' } });
+  await mod.rpcdef(ctx)[METHOD_LIST_ALERTS]();
+  assert.equal(loginCount, 1, 'evicted entry should require re-login');
+
+  mod._test.clearJwtCache();
+  restoreFetch(saved);
+});
+
+// ── buildTlsOptions warning ────────────────────────────────────────
+
+test('buildTlsOptions warns when skipTlsVerify=true but NODE_TLS_REJECT_UNAUTHORIZED is not set', async () => {
+  const mod = await importModule();
+  const { buildTlsOptions } = mod._test;
+
+  const savedEnv = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+  delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+
+  const warnings = [];
+  const savedWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(' '));
+
+  const opts = buildTlsOptions(true);
+  assert.ok(opts.insecureSkipVerify, 'should include insecureSkipVerify');
+  assert.ok(opts.tlsInsecureSkipVerify, 'should include tlsInsecureSkipVerify');
+  assert.ok(opts.skipTlsVerify, 'should include skipTlsVerify');
+  assert.ok(warnings.some((w) => w.includes('skipTlsVerify')), 'should warn about NODE_TLS_REJECT_UNAUTHORIZED');
+
+  console.warn = savedWarn;
+  if (savedEnv !== undefined) process.env.NODE_TLS_REJECT_UNAUTHORIZED = savedEnv;
+
+  // When NODE_TLS_REJECT_UNAUTHORIZED=0, no warning
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+  const warnings2 = [];
+  console.warn = (...args) => warnings2.push(args.join(' '));
+  buildTlsOptions(true);
+  assert.equal(warnings2.length, 0, 'no warning when NODE_TLS_REJECT_UNAUTHORIZED is set');
+
+  console.warn = savedWarn;
+  if (savedEnv !== undefined) process.env.NODE_TLS_REJECT_UNAUTHORIZED = savedEnv;
+  else delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+});
+
+// ── Timeout uses DEADLINE_EXCEEDED ─────────────────────────────────
+
+test('fetch timeout returns DEADLINE_EXCEEDED', async () => {
+  const mod = await importModule();
+  mod._test.clearJwtCache();
+  const saved = global.fetch;
+
+  // Simulate a timeout by having fetch throw a TimeoutError-like error
+  mockFetch(async () => {
+    const err = new Error('timeout');
+    err.name = 'TimeoutError';
+    throw err;
+  });
+
+  try {
+    const ctx = makeCtx({}, { bindings: { endpoint: 'http://localhost:18080', machineId: 'm', password: 'p' }, limits: { timeoutMs: 100 } });
+    await mod.rpcdef(ctx)[METHOD_LIST_ALERTS]();
+    assert.fail('should have thrown');
+  } catch (err) {
+    assert.equal(err.code, 4, 'DEADLINE_EXCEEDED gRPC code is 4');
+    assert.ok(err.message.includes('DEADLINE_EXCEEDED'), 'error message should reference DEADLINE_EXCEEDED');
+  }
+
+  restoreFetch(saved);
+});

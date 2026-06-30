@@ -42,12 +42,16 @@ const errorWithCode = (code, message) => {
 };
 
 const mapHttpStatus = (status, body) => {
-  if (status === 401) return errorWithCode('UNAUTHENTICATED', body?.message || 'authentication failed');
-  if (status === 403) return errorWithCode('PERMISSION_DENIED', body?.message || 'access denied');
-  if (status === 404) return errorWithCode('FAILED_PRECONDITION', body?.message || 'resource not found');
-  if (status === 400) return errorWithCode('INVALID_ARGUMENT', body?.message || 'bad request');
-  if (status >= 400 && status < 500) return errorWithCode('FAILED_PRECONDITION', body?.message || `client error ${status}`);
-  if (status >= 500) return errorWithCode('UNAVAILABLE', body?.message || `server error ${status}`);
+  // Log upstream error details server-side only; do not leak response body to callers
+  if (body?.message) {
+    console.warn(`[crowdsec] upstream HTTP ${status}: ${body.message}`);
+  }
+  if (status === 401) return errorWithCode('UNAUTHENTICATED', `authentication failed (HTTP ${status})`);
+  if (status === 403) return errorWithCode('PERMISSION_DENIED', `access denied (HTTP ${status})`);
+  if (status === 404) return errorWithCode('FAILED_PRECONDITION', `resource not found (HTTP ${status})`);
+  if (status === 400) return errorWithCode('INVALID_ARGUMENT', `bad request (HTTP ${status})`);
+  if (status >= 400 && status < 500) return errorWithCode('FAILED_PRECONDITION', `client error (HTTP ${status})`);
+  if (status >= 500) return errorWithCode('UNAVAILABLE', `server error (HTTP ${status})`);
   return null;
 };
 
@@ -55,9 +59,9 @@ const mapHttpStatus = (status, body) => {
 
 const getReqField = (req, snakeName, camelName) => {
   // proto3 SDK decodes field names as camelCase; support both conventions
-  // Use explicit undefined check to preserve falsy values (0, false, '')
-  if (req?.[snakeName] !== undefined) return req[snakeName];
-  if (req?.[camelName] !== undefined) return req[camelName];
+  // Use explicit undefined/null check to preserve falsy values (0, false, '')
+  if (req?.[snakeName] !== undefined && req?.[snakeName] !== null) return req[snakeName];
+  if (req?.[camelName] !== undefined && req?.[camelName] !== null) return req[camelName];
   return undefined;
 };
 
@@ -116,10 +120,17 @@ const requestWithDefaults = (bindings, req = {}) => {
 
 // OctoBus runtime wraps global.fetch and recognizes these TLS skip options;
 // they are NOT silently ignored as with bare Node.js native fetch (undici).
-const buildTlsOptions = (skipTls) => skipTls ? { insecureSkipVerify: true, tlsInsecureSkipVerify: true } : {};
+const buildTlsOptions = (skipTls) => {
+  if (!skipTls) return {};
+  if (process.env.NODE_TLS_REJECT_UNAUTHORIZED !== '0') {
+    console.warn('[crowdsec] skipTlsVerify is enabled but NODE_TLS_REJECT_UNAUTHORIZED is not set; TLS skip may not take effect outside OctoBus runtime');
+  }
+  return { insecureSkipVerify: true, tlsInsecureSkipVerify: true, skipTlsVerify: true };
+};
 
 // ── JWT auth ───────────────────────────────────────────────────────────────
 
+const JWT_CACHE_MAX_SIZE = 100;
 const jwtCacheMap = new Map();
 
 const getJwtToken = async (endpoint, machineId, password, timeout, skipTls) => {
@@ -132,20 +143,24 @@ const getJwtToken = async (endpoint, machineId, password, timeout, skipTls) => {
   // Evict expired entry to prevent unbounded memory growth
   if (cached) jwtCacheMap.delete(cacheKey);
 
+  // LRU eviction: enforce max cache size before inserting new entries
+  if (jwtCacheMap.size >= JWT_CACHE_MAX_SIZE) {
+    const oldestKey = jwtCacheMap.keys().next().value;
+    jwtCacheMap.delete(oldestKey);
+  }
+
   const url = `${endpoint}/v1/watchers/login`;
   const loginBody = JSON.stringify({ machine_id: machineId, password });
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
+  const signal = AbortSignal.timeout(timeout);
 
   try {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'User-Agent': 'crowdsec-octobus/v1.0' },
       body: loginBody,
-      signal: controller.signal,
+      signal,
       ...buildTlsOptions(skipTls),
     });
-    clearTimeout(timer);
     const resBody = await res.text();
 
     if (!res.ok) {
@@ -153,7 +168,7 @@ const getJwtToken = async (endpoint, machineId, password, timeout, skipTls) => {
       try { body = JSON.parse(resBody); } catch { /* not JSON, use empty */ }
       const mapped = mapHttpStatus(res.status, body);
       if (mapped) throw mapped;
-      throw errorWithCode('UNAUTHENTICATED', `login failed: ${res.status}`);
+      throw errorWithCode('UNAUTHENTICATED', `login failed (HTTP ${res.status})`);
     }
 
     const data = JSON.parse(resBody);
@@ -169,9 +184,8 @@ const getJwtToken = async (endpoint, machineId, password, timeout, skipTls) => {
     jwtCacheMap.set(cacheKey, { token, expiresAt });
     return token;
   } catch (err) {
-    clearTimeout(timer);
     if (err instanceof GrpcError) throw err;
-    if (err.name === 'AbortError') throw errorWithCode('DEADLINE_EXCEEDED', 'login request timed out');
+    if (err.name === 'AbortError' || err.name === 'TimeoutError') throw errorWithCode('DEADLINE_EXCEEDED', 'login request timed out');
     throw errorWithCode('UNAVAILABLE', `login network error: ${err.message}`);
   }
 };
@@ -207,20 +221,15 @@ const crowdsecFetch = async (endpoint, path, { method = 'GET', query, body, auth
     headers['X-Api-Key'] = req.api_key;
   }
 
-  const fetchOpts = { method, headers, signal: undefined };
+  const fetchOpts = { method, headers, signal: AbortSignal.timeout(timeout) };
   headers['User-Agent'] = 'crowdsec-octobus/v1.0';
   if (body) {
     headers['Content-Type'] = 'application/json';
     fetchOpts.body = JSON.stringify(body);
   }
 
-  const controller = new AbortController();
-  fetchOpts.signal = controller.signal;
-  const timer = setTimeout(() => controller.abort(), timeout);
-
   try {
     const res = await fetch(url, { ...fetchOpts, ...buildTlsOptions(skipTls) });
-    clearTimeout(timer);
 
     const contentType = res.headers.get('content-type') || '';
     const isJson = contentType.includes('application/json');
@@ -234,9 +243,8 @@ const crowdsecFetch = async (endpoint, path, { method = 'GET', query, body, auth
 
     return data;
   } catch (err) {
-    clearTimeout(timer);
     if (err instanceof GrpcError) throw err;
-    if (err.name === 'AbortError') throw errorWithCode('DEADLINE_EXCEEDED', 'request timed out');
+    if (err.name === 'AbortError' || err.name === 'TimeoutError') throw errorWithCode('DEADLINE_EXCEEDED', 'request timed out');
     throw errorWithCode('UNAVAILABLE', `network error: ${err.message}`);
   }
 };
@@ -509,6 +517,7 @@ export const _test = {
   buildTlsOptions,
   errorWithCode,
   getReqField,
+  mapHttpStatus,
   mergedBindings,
   resolveCallContext,
   registerHandlers,
