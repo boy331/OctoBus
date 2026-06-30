@@ -22,14 +22,16 @@ const originalConsoleLog = console.log;
 const buildCtx = (overrides = {}) => ({
   bindings: {
     host: 'https://inet.example.com',
-    username: 'user',
-    password: 'secret',
     defaultDirection: 'BOTH',
     headers: { 'x-flow': 'skycloud' },
     ...(overrides.bindings || {}),
   },
   config: overrides.config || {},
-  secret: overrides.secret || {},
+  secret: {
+    username: 'user',
+    password: 'secret',
+    ...(overrides.secret || {}),
+  },
   limits: { timeoutMs: 5000, ...(overrides.limits || {}) },
   meta: { instance_id: 'inst', request_id: 'req', ...(overrides.meta || {}) },
   req: overrides.req || {},
@@ -104,12 +106,12 @@ test('rejects missing required connection and request fields', async () => {
     (err) => assert.match(err.message, /https URL/),
   );
   await expectGrpcError(
-    () => callHandler(METHOD_BATCH_BLOCK_FULL, { environment_name: 'prod', ip_directives: ['203.0.113.1'] }, buildCtx({ bindings: { username: '', user: '' } })),
+    () => callHandler(METHOD_BATCH_BLOCK_FULL, { environment_name: 'prod', ip_directives: ['203.0.113.1'] }, buildCtx({ secret: { username: '', user: '' } })),
     'INVALID_ARGUMENT',
     (err) => assert.match(err.message, /username/),
   );
   await expectGrpcError(
-    () => callHandler(METHOD_BATCH_BLOCK_FULL, { environment_name: 'prod', ip_directives: ['203.0.113.1'] }, buildCtx({ bindings: { password: '' } })),
+    () => callHandler(METHOD_BATCH_BLOCK_FULL, { environment_name: 'prod', ip_directives: ['203.0.113.1'] }, buildCtx({ secret: { password: '' } })),
     'INVALID_ARGUMENT',
     (err) => assert.match(err.message, /password/),
   );
@@ -174,7 +176,7 @@ test('batches block requests and annotates work orders', async () => {
   assert.equal(result.results[349].batch_token, 'batch-1');
 });
 
-test('unblock RPC uses UN_BLOCKER type and request connection overrides bindings', async () => {
+test('unblock RPC uses UN_BLOCKER type and ignores request connection credentials', async () => {
   const calls = [];
   setFetch(async (url, init) => {
     calls.push({ url: String(url), body: JSON.parse(init.body), headers: init.headers });
@@ -183,15 +185,15 @@ test('unblock RPC uses UN_BLOCKER type and request connection overrides bindings
     return response(200, { code: 200, data: 'wo-9' });
   });
 
-  const result = await rpcdef(buildCtx({ bindings: { host: 'https://wrong.example.com' } }))[METHOD_BATCH_UNBLOCK_PATH]({
+  const result = await rpcdef(buildCtx({ bindings: { host: 'https://configured.example.com' }, secret: { username: 'secret-user', password: 'secret-password' } }))[METHOD_BATCH_UNBLOCK_PATH]({
     environment_name: 'prod',
     ip_directives: [{ ip: '2001:db8::1', remark: 'ipv6' }],
     connection: { host: 'https://override.example.com/', username: 'request-user', password: 'request-password' },
     ticket_template: { name: 'Manual unblock', description: 'restore', direction: 'EGRESS' },
   });
 
-  assert.equal(calls[0].url, 'https://override.example.com/api/sky-platform/auth/user/login');
-  assert.deepEqual(calls[0].body, { username: 'request-user', password: 'request-password' });
+  assert.equal(calls[0].url, 'https://configured.example.com/api/sky-platform/auth/user/login');
+  assert.deepEqual(calls[0].body, { username: 'secret-user', password: 'secret-password' });
   assert.equal(calls[2].body.type, 'UN_BLOCKER');
   assert.equal(calls[2].body.direction, 'EGRESS');
   assert.equal(calls[2].body.name, 'Manual unblock');
@@ -335,7 +337,7 @@ test('resolve context merges config secret and bindings with request alias', () 
   assert.deepEqual(ctx.bindings, {
     host: 'https://config.example.com',
     defaultDirection: 'INGRESS',
-    username: 'binding-user',
+    username: 'secret-user',
     password: 'secret-password',
   });
   assert.deepEqual(ctx.req, { environment_name: 'prod' });
@@ -351,12 +353,12 @@ test('helper functions cover alias branches and direct upstream helpers', async 
     'x-request-id': 'req2',
     accept: 'application/json',
   });
-  assert.equal(_test.requireHost({ req: { base_url: 'https://req.example.com/' }, bindings: {} }), 'https://req.example.com');
-  assert.equal(_test.requireHost({ req: { baseUrl: 'http://req.example.com' }, bindings: { allowHttpHost: true } }), 'http://req.example.com');
+  assert.throws(() => _test.requireHost({ req: { base_url: 'https://req.example.com/' }, bindings: {} }), /host\/restBaseUrl/);
+  assert.throws(() => _test.requireHost({ req: { baseUrl: 'http://req.example.com' }, bindings: { allowHttpHost: true } }), /host\/restBaseUrl/);
   assert.equal(_test.requireHost({ req: {}, bindings: { baseUrl: 'http://binding.example.com', allowHttpUrl: true } }), 'http://binding.example.com');
-  assert.equal(_test.requireUsername({ req: { user: 'request-user' }, bindings: {} }), 'request-user');
+  assert.throws(() => _test.requireUsername({ req: { user: 'request-user' }, bindings: {} }), /username/);
   assert.equal(_test.requireUsername({ req: {}, bindings: { user: 'binding-user' } }), 'binding-user');
-  assert.equal(_test.requirePassword({ req: { connection: { password: 'request-password' } }, bindings: { password: 'binding-password' } }), 'request-password');
+  assert.equal(_test.requirePassword({ req: { connection: { password: 'request-password' } }, bindings: { password: 'binding-password' } }), 'binding-password');
   assert.equal(_test.requireEnvironmentName({ req: { environmentName: 'camel-prod' } }), 'camel-prod');
 
   const normalized = _test.normalizeIpDirectives({
@@ -423,9 +425,8 @@ test('rpcdef falls back to context request when call request is omitted', async 
       bindings: {
         host: server.url,
         allowHttpBaseUrl: true,
-        username: 'user',
-        password: 'secret',
       },
+      secret: { username: 'user', password: 'secret' },
       req: { environment_name: 'prod', ip_directives: [{ ip: '192.0.2.11' }] },
     }))[METHOD_BATCH_BLOCK_PATH];
 
@@ -462,9 +463,8 @@ test('mock upstream handles full lifecycle', async () => {
       bindings: {
         host: server.url,
         allowHttpBaseUrl: true,
-        username: 'user',
-        password: 'secret',
       },
+      secret: { username: 'user', password: 'secret' },
     });
 
     const result = await callHandler(METHOD_BATCH_BLOCK_FULL,

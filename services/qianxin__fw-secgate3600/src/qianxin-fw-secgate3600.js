@@ -53,9 +53,9 @@ const requireString = (value, fieldName) => {
 };
 
 const mergedBindings = (ctx = {}) => ({
+  ...(ctx?.bindings ?? {}),
   ...(ctx?.config ?? {}),
   ...(ctx?.secret ?? {}),
-  ...(ctx?.bindings ?? {}),
 });
 
 const resolveCallContext = (ctx = {}) => ({
@@ -168,6 +168,18 @@ const requireSession = (ctx, host) => {
   const session = getSession(ctx, host);
   if (!session?.cookie || !session?.token) throw errorWithCode('FAILED_PRECONDITION', 'call Login first');
   return session;
+};
+
+const pickCredential = (ctx, fieldNames, fieldLabel) => {
+  const secret = ctx?.secret || {};
+  const config = ctx?.config || {};
+  const bindings = ctx?.bindings || {};
+  for (const field of fieldNames) {
+    const value = firstDefined(secret[field], config[field], bindings[field]);
+    const text = toTrimmedString(value);
+    if (text) return text;
+  }
+  throw errorWithCode('INVALID_ARGUMENT', `${fieldLabel} is required`);
 };
 
 const toInt64 = (value, fallback = 0) => {
@@ -287,13 +299,13 @@ const extractHeaders = (res) => {
 };
 
 const resolveLoginUsername = (req, ctx) =>
-  requireString(firstDefined(req?.username, ctx?.bindings?.user, ctx?.bindings?.username), 'username');
+  pickCredential(ctx, ['user', 'username'], 'username');
 
 const resolveLoginPassword = (req, ctx) =>
-  requireString(firstDefined(req?.password, ctx?.bindings?.password), 'password');
+  pickCredential(ctx, ['password'], 'password');
 
 const resolveLogoutUsername = (req, ctx, session) =>
-  requireString(firstDefined(req?.username, session?.username, ctx?.bindings?.user, ctx?.bindings?.username), 'username');
+  requireString(firstDefined(session?.username, ctx?.secret?.user, ctx?.secret?.username, ctx?.config?.user, ctx?.config?.username, ctx?.bindings?.user, ctx?.bindings?.username), 'username');
 
 const normalizeAddressItem = (item, fieldName) => {
   const source = item || {};
@@ -353,13 +365,13 @@ const toLoginResponse = (status, text, res, json) => {
     success: json?.success === true,
     result: {
       error_code: toTrimmedString(resultObject.error_code),
-      token: toTrimmedString(resultObject.token),
-      raw: toValue(resultObject),
+      token: '',
+      raw: undefined,
     },
     http_status: Number(status),
-    raw_body: String(text ?? ''),
-    raw_json: toValue(json),
-    headers: extractHeaders(res),
+    raw_body: '',
+    raw_json: undefined,
+    headers: [],
   };
 };
 
@@ -373,17 +385,17 @@ const toUpdateResponse = (status, text, res, json) => {
     },
     body: toValue(json?.body),
     http_status: Number(status),
-    raw_body: String(text ?? ''),
-    raw_json: toValue(json),
-    headers: extractHeaders(res),
+    raw_body: '',
+    raw_json: undefined,
+    headers: [],
   };
 };
 
 const toLogoutResponse = (status, text, res, json) => ({
-  raw_json: json === undefined ? undefined : toValue(json),
+  raw_json: undefined,
   http_status: Number(status),
-  raw_body: String(text ?? ''),
-  headers: extractHeaders(res),
+  raw_body: '',
+  headers: [],
 });
 
 const handleLogin = async (req, ctx) => {
@@ -400,11 +412,12 @@ const handleLogin = async (req, ctx) => {
   const json = requireJsonBody(upstream.text);
   validateLoginJson(json);
   const response = toLoginResponse(upstream.status, upstream.text, upstream.res, json);
-  if (response.success && response.result.error_code === 'success' && response.result.token) {
-    const cookie = mergeCookieHeader(getSetCookies(upstream.res), response.result.token);
+  const token = toTrimmedString(json?.result?.token);
+  if (response.success && response.result.error_code === 'success' && token) {
+    const cookie = mergeCookieHeader(getSetCookies(upstream.res), token);
     if (cookie) {
       setSession(callCtx, host, {
-        token: response.result.token,
+        token,
         cookie,
         username,
         login_at_ms: Date.now(),

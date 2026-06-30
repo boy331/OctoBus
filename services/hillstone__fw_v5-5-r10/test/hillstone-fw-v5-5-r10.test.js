@@ -23,12 +23,20 @@ let instanceSeq = 0;
 
 const nextInstanceId = () => `inst-${++instanceSeq}`;
 
+const defaultConfig = {
+  username: 'api_user',
+};
+
+const defaultSecret = {
+  password: 'SuperSecret!',
+};
+
 const buildCtx = (overrides = {}) => ({
   bindings: {
     ...(overrides.bindings || {}),
   },
-  config: overrides.config || {},
-  secret: overrides.secret || {},
+  config: overrides.config === undefined ? defaultConfig : overrides.config,
+  secret: overrides.secret === undefined ? defaultSecret : overrides.secret,
   limits: { timeoutMs: 10_000, ...(overrides.limits || {}) },
   meta: { instance_id: nextInstanceId(), request_id: 'req', ...(overrides.meta || {}) },
   req: overrides.req || {},
@@ -51,8 +59,8 @@ test.afterEach(() => {
 
 const loginReq = (host = 'https://203.0.113.10:8443') => ({
   host,
-  username: 'api_user',
-  password: 'SuperSecret!',
+  username: 'request_user',
+  password: 'RequestSecret!',
 });
 
 const loginOnce = async (instanceId, host = 'https://203.0.113.10:8443') => {
@@ -93,8 +101,9 @@ test('Login sends fixed fields and caches session for later calls', async () => 
     lang: 'zh_CN',
   });
   assert.equal(loginRes.http_status, 200);
-  assert.equal(loginRes.body.is_json, true);
-  assert.deepEqual(loginRes.body.json_value.structValue.fields.result.listValue.values[0].structValue.fields.token, { stringValue: 'token-123' });
+  assert.equal(loginRes.body.is_json, false);
+  assert.equal(loginRes.body.raw_text, '');
+  assert.equal(loginRes.body.json_value, null);
 
   await rpcdef(buildCtx({
     req: {
@@ -415,7 +424,7 @@ test('helper validation and body wrappers keep legacy edge behavior', async () =
   });
   assert.deepEqual(_test.buildTlsOptions({}), {});
   assert.equal(_test.resolveTimeoutMs({ bindings: { timeoutMs: -1 }, limits: { timeoutMs: 0 } }), 5000);
-  assert.deepEqual(_test.resolveCallContext({ config: { a: 1 }, secret: { b: 2 }, bindings: { c: 3 }, request: { x: 1 } }).bindings, { a: 1, b: 2, c: 3 });
+  assert.deepEqual(_test.resolveCallContext({ config: { a: 1, password: 'config' }, secret: { b: 2, password: 'secret' }, bindings: { c: 3, password: 'binding' }, request: { x: 1 } }).bindings, { a: 1, b: 2, c: 3, password: 'secret' });
   assert.equal(_test.firstDefined(undefined, null, 'x'), 'x');
   assert.equal(_test.hasOwn({ a: 1 }, 'a'), true);
 

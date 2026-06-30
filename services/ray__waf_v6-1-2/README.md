@@ -12,14 +12,19 @@ octobus service import --id ray-waf-v6-1-2 ./services//ray__waf_v6-1-2
 
 ## Configuration
 
-Static connection details may be provided through config or secret bindings:
+Static connection details are provided through config. Put the login password in `secret.schema.json`:
 
 ```json
 {
   "restBaseUrl": "http://127.0.0.1:18081",
   "user": "api_user",
-  "password": "SuperSecret",
   "skipTlsVerify": true
+}
+```
+
+```json
+{
+  "password": "SuperSecret"
 }
 ```
 
@@ -27,12 +32,12 @@ Static connection details may be provided through config or secret bindings:
 
 ## Methods
 
-- `Login`: `GET /apicenter/login/?username=...&password=...`, returning the device `random` session token.
+- `Login`: `GET /apicenter/login/?username=...&password=...`, caching the device `random` session token inside the OctoBus instance without returning it.
 - `QueryBlacklist`: `GET /apicenter/?action=blacklist_query&username=...&random=...`.
 - `BlockIP`: `POST /apicenter/?action=blacklist_update&username=...&random=...`.
 - `UnblockIP`: `POST /apicenter/?action=blacklist_del&username=...&random=...`.
 
-The service does not maintain sessions between calls. Callers should pass the `random` value returned by `Login` to query, block, and unblock requests.
+Call `Login` before query, block, and unblock. Deprecated request `random` fields are ignored.
 
 ## Request Examples
 
@@ -40,7 +45,6 @@ Block one IPv4:
 
 ```json
 {
-  "random": "x3ilv79je222bg4zaca57by45gwha212",
   "ip": "203.0.113.10"
 }
 ```
@@ -49,7 +53,6 @@ Unblock by blacklist ID:
 
 ```json
 {
-  "random": "x3ilv79je222bg4zaca57by45gwha212",
   "ids": "6"
 }
 ```

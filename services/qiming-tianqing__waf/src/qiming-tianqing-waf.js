@@ -255,8 +255,8 @@ const resolveIpList = (req = {}) => {
 
 const mergedBindings = (ctx = {}) => ({
   ...(ctx.config ?? {}),
-  ...(ctx.secret ?? {}),
   ...(ctx.bindings ?? {}),
+  ...(ctx.secret ?? {}),
 });
 
 const resolveCallContext = (ctx = {}) => ({
@@ -271,17 +271,14 @@ const requestFromContext = (ctx = {}) => ctx?.request ?? ctx?.req ?? {};
 
 const resolveCredential = (req = {}, bindings = {}) => {
   const credential = req.credential || req.credentials || {};
-  const username = pickStringField(credential, ['username', 'user']) || pickStringField(bindings, ['username', 'user']);
-  const passwordSha = pickStringField(credential, ['password_sha256', 'passwordSha256'])
-    || pickStringField(bindings, ['password_sha256', 'passwordSha256']);
-  const passwordClear = pickStringField(credential, ['password', 'password_clear'])
-    || pickStringField(bindings, ['password', 'password_clear']);
+  const username = pickStringField(bindings, ['username', 'user']);
+  const passwordSha = pickStringField(bindings, ['password_sha256', 'passwordSha256']);
+  const passwordClear = pickStringField(bindings, ['password', 'password_clear']);
   const baseUrl = normalizeBaseUrl(firstDefined(
-    pickStringField(credential, ['base_url', 'baseUrl', 'rest_base_url', 'restBaseUrl']),
     pickStringField(bindings, ['restBaseUrl', 'baseUrl', 'rest_base_url', 'base_url', 'url']),
   ));
   if (!baseUrl) throw errorWithCode('INVALID_ARGUMENT', 'base_url/restBaseUrl is required and must start with http:// or https://');
-  if (!username) throw errorWithCode('INVALID_ARGUMENT', 'username is required (request credential or bindings.username)');
+  if (!username) throw errorWithCode('INVALID_ARGUMENT', 'username is required in instance config or secret');
 
   const result = {
     baseUrl,
@@ -383,12 +380,12 @@ const fetchJson = async (url, init = {}, skipTlsVerify = false) => {
   if (!ok) {
     const text = typeof json === 'object' ? JSON.stringify(json) : String(json);
     if (res.status === 401 || res.status === 403) {
-      throw errorWithCode('PERMISSION_DENIED', `upstream http ${res.status}: ${text}`);
+      throw errorWithCode('PERMISSION_DENIED', `upstream http ${res.status}`);
     }
     if (res.status >= 400 && res.status < 500) {
-      throw errorWithCode('FAILED_PRECONDITION', `upstream http ${res.status}: ${text}`);
+      throw errorWithCode('FAILED_PRECONDITION', `upstream http ${res.status}`);
     }
-    throw errorWithCode('UNAVAILABLE', `upstream http ${res.status}: ${text}`);
+    throw errorWithCode('UNAVAILABLE', `upstream http ${res.status}`);
   }
   return { json, headers: res.headers };
 };
@@ -577,8 +574,8 @@ const executeBlock = async (ctx = {}) => {
   return {
     status: 'OPERATION_STATUS_SUCCESS',
     blocked_ips: blocked,
-    authorization: loginResult.authorization,
-    sid: loginResult.sid,
+    authorization: '',
+    sid: '',
   };
 };
 
@@ -611,8 +608,8 @@ const executeUnblock = async (ctx = {}) => {
   return {
     status: 'OPERATION_STATUS_SUCCESS',
     unblocked_ips: unblocked,
-    authorization: loginResult.authorization,
-    sid: loginResult.sid,
+    authorization: '',
+    sid: '',
   };
 };
 

@@ -17,7 +17,7 @@ The package preserves the legacy flow:
 
 ## Configuration
 
-Instance config or request credentials may provide:
+Instance config provides the base URL and username. Instance secret provides the password or precomputed password digest:
 
 ```json
 {
@@ -29,6 +29,7 @@ Instance config or request credentials may provide:
 ```
 
 `restBaseUrl`, `base_url`, and `url` are accepted as base URL aliases. `password_sha256` and `passwordSha256` are accepted when a precomputed SHA-256 password digest is already available.
+Deprecated request `credential` fields are ignored for credentials. `BlockIPResponse.authorization`, `BlockIPResponse.sid`, `UnblockIPResponse.authorization`, and `UnblockIPResponse.sid` are retained only for proto compatibility and are returned empty.
 
 ## Request Examples
 

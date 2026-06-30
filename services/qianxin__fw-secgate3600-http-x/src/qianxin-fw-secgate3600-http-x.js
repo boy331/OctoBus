@@ -13,6 +13,8 @@ export const DEFAULT_MASK = '255.255.255.0';
 export const LOGIN_URI = '/webui/login/auth';
 export const BLACKLIST_URI = '/webui/blacklist/set';
 
+const SESSION_CACHE = new Map();
+
 const grpcCodeFor = (code) => ({
   INVALID_ARGUMENT: grpcStatus.INVALID_ARGUMENT,
   UNAVAILABLE: grpcStatus.UNAVAILABLE,
@@ -66,9 +68,9 @@ const getField = (source, candidates) => {
 };
 
 const mergedBindings = (ctx = {}) => ({
+  ...(ctx?.bindings ?? {}),
   ...(ctx?.config ?? {}),
   ...(ctx?.secret ?? {}),
-  ...(ctx?.bindings ?? {}),
 });
 
 const resolveCallContext = (ctx = {}) => ({
@@ -175,9 +177,20 @@ const buildUrl = (host, path, query = {}) => {
   return pairs.length ? `${prefix}?${pairs.join('&')}` : prefix;
 };
 
-const buildLoginQuery = (req = {}) => {
-  const user = requireString(req.user, 'user');
-  const password = requireString(req.password, 'password');
+const pickCredential = (ctx, fieldNames, fieldLabel) => {
+  const secret = ctx?.secret || {};
+  const config = ctx?.config || {};
+  const bindings = ctx?.bindings || {};
+  for (const field of fieldNames) {
+    const text = normalizeString(secret[field] ?? config[field] ?? bindings[field]);
+    if (text) return text;
+  }
+  throw errorWithCode('INVALID_ARGUMENT', `${fieldLabel} is required`);
+};
+
+const buildLoginQuery = (req = {}, ctx = {}) => {
+  const user = pickCredential(ctx, ['user', 'username'], 'user');
+  const password = pickCredential(ctx, ['password'], 'password');
   const query = { user, password };
   const language = optionalString(getField(req, ['txtLanguage', 'txt_language']));
   if (language) query.txt_language = language;
@@ -188,7 +201,32 @@ const buildLoginQuery = (req = {}) => {
   return query;
 };
 
-const buildBlacklistQuery = (req = {}) => ({ uuid: requireString(req.uuid, 'uuid') });
+const getSessionKey = (ctx, host) => {
+  const user = pickCredential(ctx, ['user', 'username'], 'user');
+  const instance = ctx?.meta?.instance_id || ctx?.meta?.instanceId || 'default';
+  const service = ctx?.serviceId || ctx?.service_id || 'qianxin-fw-secgate3600-http-x';
+  return `${service}:${instance}:${host}:${user}`;
+};
+
+const getSession = (ctx, host) => SESSION_CACHE.get(getSessionKey(ctx, host));
+
+const setSession = (ctx, host, session) => SESSION_CACHE.set(getSessionKey(ctx, host), session);
+
+const clearAllSessions = () => SESSION_CACHE.clear();
+
+const extractLoginSession = (rawBody) => {
+  const json = parseJsonObject(rawBody);
+  const uuid = optionalString(json.uuid ?? json.UUID ?? json.data?.uuid ?? json.data?.UUID);
+  return uuid ? { uuid } : null;
+};
+
+const requireSession = (ctx, host) => {
+  const session = getSession(ctx, host);
+  if (!session?.uuid) throw errorWithCode('INVALID_ARGUMENT', 'call Login first');
+  return session;
+};
+
+const buildBlacklistQuery = (ctx = {}) => ({ uuid: requireSession(ctx, resolveHost(ctx)).uuid });
 
 const buildBlacklistBody = (req = {}, undoFlag) => {
   const ip = requireString(req.ip, 'ip');
@@ -245,19 +283,36 @@ const extractHeaders = (res) => {
   return Array.from(map.entries()).map(([key, values]) => ({ key, values }));
 };
 
-const normalizeResponse = (status, headers, rawBody, effectiveUrl) => ({
-  status_code: Number(status) || 0,
-  statusCode: Number(status) || 0,
-  headers,
-  raw_body: String(rawBody ?? ''),
-  rawBody: String(rawBody ?? ''),
-  body_json: toStruct(parseJsonObject(rawBody)),
-  bodyJson: parseJsonObject(rawBody),
-  effective_url: effectiveUrl,
-  effectiveUrl,
+const sanitizeHeaders = (headers = []) => headers.filter((header) => {
+  const key = String(header?.key || '').toLowerCase();
+  return key !== 'set-cookie' && key !== 'cookie' && key !== 'authorization';
 });
 
-const fetchHttp = async (ctx, url, init = {}) => {
+const sanitizeEffectiveUrl = (url) => {
+  try {
+    const parsed = new URL(String(url));
+    for (const key of ['user', 'username', 'password', 'token', 'authorization']) {
+      if (parsed.searchParams.has(key)) parsed.searchParams.set(key, 'REDACTED');
+    }
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+};
+
+const normalizeResponse = (status, headers, rawBody, effectiveUrl, options = {}) => ({
+  status_code: Number(status) || 0,
+  statusCode: Number(status) || 0,
+  headers: sanitizeHeaders(headers),
+  raw_body: options.omitRawBody ? '' : String(rawBody ?? ''),
+  rawBody: options.omitRawBody ? '' : String(rawBody ?? ''),
+  body_json: options.omitParsedBody ? { fields: {} } : toStruct(parseJsonObject(rawBody)),
+  bodyJson: options.omitParsedBody ? {} : parseJsonObject(rawBody),
+  effective_url: options.omitEffectiveUrl ? '' : (options.sanitizeUrl ? sanitizeEffectiveUrl(effectiveUrl) : effectiveUrl),
+  effectiveUrl: options.omitEffectiveUrl ? '' : (options.sanitizeUrl ? sanitizeEffectiveUrl(effectiveUrl) : effectiveUrl),
+});
+
+const fetchHttp = async (ctx, url, init = {}, options = {}) => {
   let res;
   try {
     res = await fetch(url, {
@@ -269,34 +324,47 @@ const fetchHttp = async (ctx, url, init = {}) => {
     throw errorWithCode('UNAVAILABLE', err?.cause?.message || err?.message || 'fetch failed');
   }
   const text = await res.text();
-  return normalizeResponse(res.status, extractHeaders(res), text, url);
+  if (typeof options.onResponse === 'function') options.onResponse({ status: res.status, headers: res.headers, text, url });
+  return normalizeResponse(res.status, extractHeaders(res), text, url, options);
 };
 
 const handleLogin = (req, ctx) => {
   const callCtx = resolveCallContext({ ...ctx, req, request: req });
-  const query = buildLoginQuery(callCtx.req || {});
-  return fetchHttp(callCtx, buildUrl(resolveHost(callCtx), LOGIN_URI, query), {
+  const host = resolveHost(callCtx);
+  const query = buildLoginQuery(callCtx.req || {}, callCtx);
+  return fetchHttp(callCtx, buildUrl(host, LOGIN_URI, query), {
     method: 'GET',
     headers: buildHeaders(callCtx),
+  }, {
+    omitRawBody: true,
+    omitParsedBody: true,
+    omitEffectiveUrl: true,
+    sanitizeUrl: true,
+    onResponse: ({ text }) => {
+      const session = extractLoginSession(text);
+      if (session) setSession(callCtx, host, session);
+    },
   });
 };
 
 const handleBlock = (req, ctx) => {
   const callCtx = resolveCallContext({ ...ctx, req, request: req });
-  return fetchHttp(callCtx, buildUrl(resolveHost(callCtx), BLACKLIST_URI, buildBlacklistQuery(callCtx.req || {})), {
+  const host = resolveHost(callCtx);
+  return fetchHttp(callCtx, buildUrl(host, BLACKLIST_URI, buildBlacklistQuery(callCtx)), {
     method: 'POST',
     headers: buildHeaders(callCtx, { 'content-type': 'application/json' }),
     body: JSON.stringify(buildBlacklistBody(callCtx.req || {}, false)),
-  });
+  }, { omitRawBody: true, omitParsedBody: true, omitEffectiveUrl: true });
 };
 
 const handleUnblock = (req, ctx) => {
   const callCtx = resolveCallContext({ ...ctx, req, request: req });
-  return fetchHttp(callCtx, buildUrl(resolveHost(callCtx), BLACKLIST_URI, buildBlacklistQuery(callCtx.req || {})), {
+  const host = resolveHost(callCtx);
+  return fetchHttp(callCtx, buildUrl(host, BLACKLIST_URI, buildBlacklistQuery(callCtx)), {
     method: 'POST',
     headers: buildHeaders(callCtx, { 'content-type': 'application/json' }),
     body: JSON.stringify(buildBlacklistBody(callCtx.req || {}, true)),
-  });
+  }, { omitRawBody: true, omitParsedBody: true, omitEffectiveUrl: true });
 };
 
 export function rpcdef(ctx = {}) {
@@ -321,10 +389,13 @@ export const _test = {
   buildLoginQuery,
   buildTlsOptions,
   buildUrl,
+  clearAllSessions,
   errorWithCode,
+  extractLoginSession,
   extractHeaders,
   fetchHttp,
   getField,
+  getSession,
   normalizeBaseUrl,
   normalizeResponse,
   normalizeString,
@@ -332,9 +403,11 @@ export const _test = {
   optionalUint32,
   parseJsonObject,
   requireString,
+  requireSession,
   resolveCallContext,
   resolveHost,
   resolveTimeoutMs,
+  setSession,
   toBoolean,
   toStruct,
   toValue,

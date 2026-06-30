@@ -23,7 +23,8 @@ const upstreamError = (code, message, details = {}) => {
     code,
     message,
     http_status_code: Number.isFinite(Number(details.httpStatusCode)) ? Number(details.httpStatusCode) : 0,
-    http_body: typeof details.httpBody === 'string' ? details.httpBody : '',
+    http_body: '',
+    http_body_length: typeof details.httpBody === 'string' ? details.httpBody.length : 0,
     reason: String(details.reason || '').trim(),
   };
   if (Number.isFinite(Number(details.errcode))) payload.errcode = Number(details.errcode);
@@ -68,9 +69,16 @@ const requireString = (value, fieldName) => {
 
 const mergedBindings = (ctx = {}) => ({
   ...(ctx.config ?? {}),
-  ...(ctx.secret ?? {}),
   ...(ctx.bindings ?? {}),
+  ...(ctx.secret ?? {}),
 });
+
+const resolveWebhook = (ctx = {}) => {
+  const keys = ['webhook', 'webhook_url', 'webhookUrl', 'url'];
+  return pickFirst(ctx.secret || {}, keys)
+    ?? pickFirst(ctx.config || {}, keys)
+    ?? pickFirst(ctx.bindings || {}, keys);
+};
 
 const resolveCallContext = (ctx = {}) => ({
   ...ctx,
@@ -200,7 +208,7 @@ const buildWecomPayload = (message, mentionedMobiles) => {
 
 const handleSendText = async (req = {}, ctx = {}) => {
   const callCtx = resolveCallContext(ctx);
-  const webhook = requireWebhook(pickFirst(req, ['webhook']));
+  const webhook = requireWebhook(resolveWebhook(callCtx));
   const message = requireString(pickFirst(req, ['message']), 'message');
   const mentionedMobiles = splitMentionedMobiles(pickFirst(req, ['mentioned_mobiles', 'mentionedMobiles']));
   const payload = buildWecomPayload(message, mentionedMobiles);
@@ -237,7 +245,7 @@ const handleSendText = async (req = {}, ctx = {}) => {
 
   return {
     http_status_code: upstream.status,
-    http_body: upstream.bodyText,
+    http_body: '',
     errcode: bodyInfo.errcode,
     errmsg: bodyInfo.errmsg,
   };
@@ -270,6 +278,7 @@ export const _test = {
   requireString,
   requireWebhook,
   resolveCallContext,
+  resolveWebhook,
   resolveTimeoutMs,
   splitMentionedMobiles,
   toBoolean,

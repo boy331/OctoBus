@@ -46,9 +46,16 @@ const resolveBindingString = (bindings, keys) => {
 
 const mergedBindings = (ctx = {}) => ({
   ...(ctx?.config ?? {}),
-  ...(ctx?.secret ?? {}),
   ...(ctx?.bindings ?? {}),
+  ...(ctx?.secret ?? {}),
 });
+
+const resolveWebhook = (ctx = {}) => {
+  const keys = ['webhook', 'webhook_url', 'webhookUrl', 'url'];
+  return resolveBindingString(ctx.secret || {}, keys)
+    || resolveBindingString(ctx.config || {}, keys)
+    || resolveBindingString(ctx.bindings || {}, keys);
+};
 
 const resolveCallContext = (ctx = {}) => ({
   ...ctx,
@@ -147,7 +154,7 @@ const sendToFeishu = async (ctx, webhook, payload, log) => {
 
 const handleSendTextMessage = async (req, ctx) => {
   const callCtx = resolveCallContext(ctx);
-  const webhook = normalizeWebhook(resolveBindingString(callCtx.bindings, ['webhook', 'webhook_url', 'webhookUrl', 'url']));
+  const webhook = normalizeWebhook(resolveWebhook(callCtx));
   if (!webhook) {
     throw errorWithCode('INVALID_ARGUMENT', 'webhook is required (https://open.feishu.cn/open-apis/bot/v2/hook/{token})');
   }
@@ -191,6 +198,7 @@ rpcdef.__test__ = {
   normalizeWebhook,
   redactWebhook,
   registerHandlers,
+  resolveWebhook,
   resolveBindingString,
   resolveCallContext,
   resolveTimeoutMs,

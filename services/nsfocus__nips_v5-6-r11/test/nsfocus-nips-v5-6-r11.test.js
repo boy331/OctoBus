@@ -27,12 +27,10 @@ const nextInst = () => `inst-${++instSeq}`;
 const buildCtx = (overrides = {}) => ({
   bindings: {
     host: 'http://device.example:8443',
-    user: 'api_user',
-    password: 'SuperSecret!',
     ...(overrides.bindings || {}),
   },
   config: overrides.config || {},
-  secret: overrides.secret || {},
+  secret: { user: 'api_user', password: 'SuperSecret!', ...(overrides.secret || {}) },
   limits: { timeoutMs: 10_000, ...(overrides.limits || {}) },
   meta: { instance_id: overrides.instance_id || nextInst(), request_id: 'req' },
   req: overrides.req || {},
@@ -94,12 +92,12 @@ test('Login rejects missing host, username, and password', async () => {
     (err) => assert.match(err.message, /host is required/),
   );
   await expectGrpcError(
-    () => rpcdef(buildCtx({ req: { username: '', password: '' }, bindings: { user: '', password: '' } }))[LOGIN_PATH](),
+    () => rpcdef(buildCtx({ req: { username: '', password: '' }, secret: { user: '', username: '', password: 'pw' } }))[LOGIN_PATH](),
     'INVALID_ARGUMENT',
     (err) => assert.match(err.message, /username is required/),
   );
   await expectGrpcError(
-    () => rpcdef(buildCtx({ req: { username: 'api_user', password: '' }, bindings: { password: '' } }))[LOGIN_PATH](),
+    () => rpcdef(buildCtx({ req: { username: 'api_user', password: '' }, secret: { password: '' } }))[LOGIN_PATH](),
     'INVALID_ARGUMENT',
     (err) => assert.match(err.message, /password is required/),
   );
@@ -136,15 +134,17 @@ test('Login stores cookie and keys; BlockIP sends Cookie, sign query, headers, T
 
   const loginCtx = buildCtx({
     instance_id: inst,
-    req: { username: 'api_user', password: 'SuperSecret!', lang: 'en_US' },
+    req: { username: 'ignored-user', password: 'ignored-password', lang: 'en_US' },
     bindings: { headers: { 'X-Device': 'demo' }, skipTlsVerify: true },
     limits: { timeoutMs: undefined },
   });
   const loginRes = await rpcdef(loginCtx)[LOGIN_PATH]();
 
   assert.equal(loginRes.code, 2000);
-  assert.equal(loginRes.api_key, 'ak');
-  assert.equal(loginRes.security_key, 'sk');
+  assert.equal(loginRes.api_key, '');
+  assert.equal(loginRes.security_key, '');
+  assert.equal(loginRes.raw_body, '');
+  assert.equal(loginRes.raw_json, undefined);
   assert.equal(calls[0].init.timeoutMs, 1500);
   assert.equal(calls[0].init.headers['Content-Type'], 'application/json');
   assert.equal(calls[0].init.headers['X-Device'], 'demo');
@@ -187,7 +187,7 @@ test('Login stores cookie and keys; BlockIP sends Cookie, sign query, headers, T
   assert.match(url.searchParams.get('sign'), /^[0-9a-f]{64}$/);
 });
 
-test('parseable HTTP errors return OK payloads with status and raw fields', async () => {
+test('parseable HTTP errors return OK payloads with sanitized raw fields', async () => {
   const inst = nextInst();
   let step = 0;
   setFetch(async () => {
@@ -207,7 +207,8 @@ test('parseable HTTP errors return OK payloads with status and raw fields', asyn
   assert.equal(result.http_status, 500);
   assert.equal(result.code, 7000);
   assert.equal(result.message, 'duplicate');
-  assert.equal(result.raw_body, '{"code":7000,"message":"duplicate","data":null}');
+  assert.equal(result.raw_body, '');
+  assert.equal(result.raw_json, undefined);
 });
 
 test('network, empty, non-json, and text read failures map to legacy errors', async () => {
@@ -439,16 +440,8 @@ test('helpers cover scalar, URL, cookie, signing, response, and validation branc
     message: 'm',
     data: { listValue: { values: [{ stringValue: 'x' }] } },
     http_status: 201,
-    raw_body: '{"code":1}',
-    raw_json: {
-      structValue: {
-        fields: {
-          code: { stringValue: '1' },
-          message: { stringValue: 'm' },
-          data: { listValue: { values: [{ stringValue: 'x' }] } },
-        },
-      },
-    },
+    raw_body: '',
+    raw_json: undefined,
   });
   assert.equal(_test.errorWithCode('NOT_REAL', 'fallback').code, grpcStatus.UNKNOWN);
 });

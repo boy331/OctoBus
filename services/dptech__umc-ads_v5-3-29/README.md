@@ -17,7 +17,7 @@ octobus service import --id dptech-umc-ads-v5-3-29 ./services//dptech__umc-ads_v
 - `src/dptech-umc-ads-v5-3-29.js`: DPtech UMC ADS REST proxy implementation.
 - `src/service.js`: OctoBus SDK `defineService` wrapper.
 - `bin/dptech-umc-ads-v5-3-29.js`: service-local executable entrypoint.
-- `test/dptech-umc-ads-v5-3-29.test.js`: node:test coverage for login caching, request mapping, token resolution, validation, error classification, and SDK handler invocation.
+- `test/dptech-umc-ads-v5-3-29.test.js`: node:test coverage for login caching, request mapping, secret handling, validation, error classification, and SDK handler invocation.
 - `test/mock_upstream.js`: optional local DPtech UMC ADS HTTP mock.
 
 ## Configuration
@@ -53,9 +53,9 @@ Use `secret.password`, `secret.pass`, or `secret.secret` for the login secret ke
 
 ## Behavior Notes
 
-- `Login` calls the UMC token API with `userName` and `secretKey`, then caches a successful token per OctoBus instance and host.
-- `QueryBlacklist`, `AddBlacklist`, and `DeleteBlacklist` use a request `token` when provided, otherwise they require a prior successful `Login`.
-- Upstream HTTP responses, including non-2xx statuses, are returned as gRPC OK payloads with `http_status`, `raw_body`, and `raw_json` when parsable.
+- `Login` calls the UMC token API with `userName` and `secretKey`, then caches a successful token per OctoBus instance and host. The login response intentionally leaves raw fields empty because the upstream body contains the token.
+- `QueryBlacklist`, `AddBlacklist`, and `DeleteBlacklist` require a prior successful `Login`; deprecated request token fields are ignored.
+- Non-login upstream HTTP responses, including non-2xx statuses, are returned as gRPC OK payloads with `http_status`, `raw_body`, and `raw_json` when parsable.
 - Network failures and local validation errors return gRPC errors.
 - Add/delete requests accept 1 to 100 IPv4 or IPv6 addresses. CIDR and address ranges are rejected.
 - Add requests generate `strategyName`, `protectionName`, and the fixed DPtech strategy fields used by the legacy service.

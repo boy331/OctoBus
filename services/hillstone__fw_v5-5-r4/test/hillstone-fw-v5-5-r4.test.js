@@ -20,12 +20,20 @@ import { service } from '../src/service.js';
 
 const originalFetch = globalThis.fetch;
 
+const defaultConfig = {
+  userName: 'api_user',
+};
+
+const defaultSecret = {
+  password: 'U3VwZXJTZWNyZXQh',
+};
+
 const buildCtx = (overrides = {}) => ({
   bindings: {
     ...(overrides.bindings || {}),
   },
-  config: overrides.config || {},
-  secret: overrides.secret || {},
+  config: overrides.config === undefined ? defaultConfig : overrides.config,
+  secret: overrides.secret === undefined ? defaultSecret : overrides.secret,
   limits: { timeoutMs: 10_000, ...(overrides.limits || {}) },
   meta: { instance_id: 'inst', request_id: 'req', ...(overrides.meta || {}) },
   req: overrides.req || {},
@@ -52,6 +60,14 @@ const cookie = {
   lang: 'zh_CN',
 };
 
+const seedSession = (ctx, host = 'https://203.0.113.10:8443', session = cookie) => {
+  _test.setSession(ctx, host, {
+    ...session,
+    vsysId: session.vsysId ?? session.vsys_id,
+  });
+  return ctx;
+};
+
 const expectStructuredError = async (fn, code, checker) => {
   let caught;
   try {
@@ -74,6 +90,7 @@ const expectStructuredError = async (fn, code, checker) => {
 
 test.afterEach(() => {
   globalThis.fetch = originalFetch;
+  _test.clearAllSessions();
 });
 
 test('Login sends text/plain JSON body with defaults', async () => {
@@ -86,8 +103,8 @@ test('Login sends text/plain JSON body with defaults', async () => {
   const result = await rpcdef(buildCtx({
     req: {
       host: 'https://203.0.113.10:8443',
-      user_name: 'api_user',
-      password: 'U3VwZXJTZWNyZXQh',
+      user_name: 'request_user',
+      password: 'request-password',
     },
   }))[LOGIN_PATH]();
 
@@ -104,7 +121,7 @@ test('Login sends text/plain JSON body with defaults', async () => {
     lang: 'zh_CN',
   });
   assert.equal(result.http_status, 200);
-  assert.match(result.http_body, /"success":true/);
+  assert.equal(result.http_body, '');
 });
 
 test('CreateAddressGroup sends full cookie header and JSON array text body', async () => {
@@ -114,10 +131,9 @@ test('CreateAddressGroup sends full cookie header and JSON array text body', asy
     return okResponse('{"success":true}');
   };
 
-  const result = await rpcdef(buildCtx({
+  const result = await rpcdef(seedSession(buildCtx({
     req: {
       host: 'https://203.0.113.10:8443',
-      cookie,
       address_books: [
         {
           name: 'BLOCK_GROUP_01',
@@ -128,7 +144,7 @@ test('CreateAddressGroup sends full cookie header and JSON array text body', asy
         },
       ],
     },
-  }))[CREATE_ADDRESS_GROUP_PATH]();
+  })))[CREATE_ADDRESS_GROUP_PATH]();
 
   assert.equal(captured.url, 'https://203.0.113.10:8443/rest/doc/addrbook');
   assert.equal(captured.init.method, 'POST');
@@ -152,10 +168,9 @@ test('UpdateAddressGroup preserves optional range/entry/host arrays', async () =
     return okResponse('{"success":true,"result":[]}');
   };
 
-  await rpcdef(buildCtx({
+  await rpcdef(seedSession(buildCtx({
     req: {
       host: 'https://203.0.113.10:8443',
-      cookie,
       addressBooks: [
         {
           name: 'BLOCK_GROUP_01',
@@ -166,7 +181,7 @@ test('UpdateAddressGroup preserves optional range/entry/host arrays', async () =
         },
       ],
     },
-  }))[UPDATE_ADDRESS_GROUP_PATH]();
+  })))[UPDATE_ADDRESS_GROUP_PATH]();
 
   const payload = JSON.parse(captured.init.body);
   assert.equal(captured.init.method, 'PUT');
@@ -182,16 +197,15 @@ test('QueryAddressGroup encodes name/start/limit/page into query parameter', asy
     return okResponse('{"success":true,"result":[]}');
   };
 
-  const result = await rpcdef(buildCtx({
+  const result = await rpcdef(seedSession(buildCtx({
     req: {
       host: 'https://203.0.113.10:8443',
-      cookie,
       name: 'BLOCK_GROUP_01',
       start: 0,
       limit: 100,
       page: 2,
     },
-  }))[QUERY_ADDRESS_GROUP_PATH]();
+  })))[QUERY_ADDRESS_GROUP_PATH]();
 
   assert.equal(result.http_status, 200);
   assert.ok(captured.url.startsWith('https://203.0.113.10:8443/rest/doc/addrbook?query='));
@@ -205,16 +219,15 @@ test('QueryAddressGroup encodes name/start/limit/page into query parameter', asy
   });
 });
 
-test('CreateAddressGroup validates required cookie fields', async () => {
+test('CreateAddressGroup validates cached session before request cookies', async () => {
   await assert.rejects(
     () => rpcdef(buildCtx({
       req: {
         host: 'https://203.0.113.10:8443',
-        cookie: { token: 'token-123' },
         address_books: [{ name: 'BLOCK_GROUP_01', ip: [{ ip_addr: '203.0.113.10', netmask: '32', flag: 0 }] }],
       },
     }))[CREATE_ADDRESS_GROUP_PATH](),
-    /cookie\.fromrootvsys is required/,
+    /call Login first/,
   );
 });
 
@@ -229,13 +242,14 @@ test('HTTP errors map to structured gRPC errors', async () => {
   for (const [status, code] of cases) {
     globalThis.fetch = async () => responseWithStatus(status, '{"success":false,"msg":"error"}');
     await expectStructuredError(
-      () => rpcdef(buildCtx({
-        req: { host: 'https://203.0.113.10:8443', cookie, name: 'BLOCK_GROUP_01' },
-      }))[QUERY_ADDRESS_GROUP_PATH](),
+      () => rpcdef(seedSession(buildCtx({
+        req: { host: 'https://203.0.113.10:8443', name: 'BLOCK_GROUP_01' },
+      })))[QUERY_ADDRESS_GROUP_PATH](),
       code,
       (payload) => {
         assert.equal(payload.http_status, status);
-        assert.match(payload.http_body, /error/);
+        assert.equal(payload.http_body, '');
+        assert.ok(payload.http_body_length > 0);
         assert.equal(payload.reason, 'http status is not 2xx');
       },
     );
@@ -251,8 +265,6 @@ test('Login maps transport failure to structured UNAVAILABLE with http_status 0'
     () => rpcdef(buildCtx({
       req: {
         host: 'https://203.0.113.10:8443',
-        user_name: 'api_user',
-        password: 'U3VwZXJTZWNyZXQh',
       },
     }))[LOGIN_PATH](),
     'UNAVAILABLE',
@@ -302,17 +314,17 @@ test('SDK handlers merge config and secret bindings', async () => {
 
 test('direct SDK handlers cover create, update, and query paths', async () => {
   globalThis.fetch = async () => okResponse('{"success":true}');
-  const baseReq = { host: 'https://203.0.113.10:8443', cookie };
+  const baseReq = { host: 'https://203.0.113.10:8443' };
 
-  assert.equal((await handlers[METHOD_CREATE_ADDRESS_GROUP_FULL](buildCtx({
+  assert.equal((await handlers[METHOD_CREATE_ADDRESS_GROUP_FULL](seedSession(buildCtx({
     req: { ...baseReq, address_books: [{ name: 'g', ip: [{ ip_addr: '203.0.113.10', netmask: '32' }] }] },
-  }))).http_status, 200);
-  assert.equal((await handlers[METHOD_UPDATE_ADDRESS_GROUP_FULL](buildCtx({
+  })))).http_status, 200);
+  assert.equal((await handlers[METHOD_UPDATE_ADDRESS_GROUP_FULL](seedSession(buildCtx({
     req: { ...baseReq, address_books: [{ name: 'g', ip: [{ ip_addr: '203.0.113.11', netmask: '32' }] }] },
-  }))).http_status, 200);
-  assert.equal((await handlers[METHOD_QUERY_ADDRESS_GROUP_FULL](buildCtx({
+  })))).http_status, 200);
+  assert.equal((await handlers[METHOD_QUERY_ADDRESS_GROUP_FULL](seedSession(buildCtx({
     req: { ...baseReq, name: 'g', limit: 0, page: 0 },
-  }))).http_status, 200);
+  })))).http_status, 200);
 });
 
 test('helper functions keep legacy edge behavior stable', async () => {
@@ -336,7 +348,7 @@ test('helper functions keep legacy edge behavior stable', async () => {
   });
   assert.deepEqual(_test.buildTlsOptions({}), {});
   assert.equal(_test.resolveTimeoutMs({ bindings: { timeoutMs: -1 }, limits: { timeoutMs: 0 } }), 5000);
-  assert.deepEqual(_test.resolveCallContext({ config: { a: 1 }, secret: { b: 2 }, bindings: { c: 3 }, request: { x: 1 } }).bindings, { a: 1, b: 2, c: 3 });
+  assert.deepEqual(_test.resolveCallContext({ config: { a: 1, password: 'config' }, secret: { b: 2, password: 'secret' }, bindings: { c: 3, password: 'binding' }, request: { x: 1 } }).bindings, { a: 1, b: 2, c: 3, password: 'secret' });
   assert.equal(_test.firstDefined(undefined, null, 'x'), 'x');
   assert.equal(_test.hasOwn({ a: 1 }, 'a'), true);
   assert.deepEqual(_test.asArray({ values: [{ value: 'a' }, 'b'] }), ['a', 'b']);
@@ -351,8 +363,8 @@ test('helper functions keep legacy edge behavior stable', async () => {
   assert.deepEqual(_test.mapAddressBook({ name: 'g', ip: [], range: [], entry: [], host: [] }), { name: 'g', ip: [] });
   assert.throws(() => _test.buildAddressBooks([]), /at least one/);
   assert.deepEqual(_test.buildLoginPayload({ userName: 'u', password: 'p', ifVsysId: '2', vrId: '3', lang: 'en_US' }, buildCtx()), {
-    userName: 'u',
-    password: 'p',
+    userName: 'api_user',
+    password: 'U3VwZXJTZWNyZXQh',
     ifVsysId: '2',
     vrId: '3',
     lang: 'en_US',

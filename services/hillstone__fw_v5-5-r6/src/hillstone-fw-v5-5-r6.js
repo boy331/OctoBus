@@ -15,6 +15,8 @@ export const DEFAULT_TIMEOUT_MS = 1500;
 export const DEFAULT_LANG = 'zh_CN';
 export const DEFAULT_LIMIT = 100;
 
+const SESSION_CACHE = new Map();
+
 const grpcCodeFor = (code) => ({
   FAILED_PRECONDITION: grpcStatus.FAILED_PRECONDITION,
   INVALID_ARGUMENT: grpcStatus.INVALID_ARGUMENT,
@@ -58,8 +60,8 @@ const toInteger = (value, fallback = 0) => {
 
 const mergedBindings = (ctx = {}) => ({
   ...(ctx?.config ?? {}),
-  ...(ctx?.secret ?? {}),
   ...(ctx?.bindings ?? {}),
+  ...(ctx?.secret ?? {}),
 });
 
 const resolveCallContext = (ctx = {}) => ({
@@ -137,6 +139,23 @@ const buildCookieHeader = (cookies) => {
   return parts.join('; ');
 };
 
+const getInstanceKey = (ctx) => String(ctx?.meta?.instance_id || ctx?.meta?.instanceId || 'default');
+
+const getInstanceSessionMap = (ctx) => {
+  const key = getInstanceKey(ctx);
+  let map = SESSION_CACHE.get(key);
+  if (!map) {
+    map = new Map();
+    SESSION_CACHE.set(key, map);
+  }
+  return map;
+};
+
+const getSession = (ctx, host) => getInstanceSessionMap(ctx).get(host);
+const setSession = (ctx, host, session) => getInstanceSessionMap(ctx).set(host, session);
+const clearSession = (ctx, host) => getInstanceSessionMap(ctx).delete(host);
+const clearAllSessions = () => SESSION_CACHE.clear();
+
 const buildLoginPayload = (username, password, lang) => ({
   userName: username,
   password,
@@ -187,15 +206,10 @@ const requirePassword = (ctx) => {
   return password;
 };
 
-const requireCookies = (req) => {
-  const cookies = firstDefined(req?.cookies, req?.cookie);
-  if (!cookies || typeof cookies !== 'object') {
-    throw errorWithCode('INVALID_ARGUMENT', 'cookies is required');
-  }
-  if (!unwrapScalar(cookies.token)) {
-    throw errorWithCode('INVALID_ARGUMENT', 'cookies.token is required');
-  }
-  return cookies;
+const requireSession = (ctx, host) => {
+  const session = getSession(ctx, host);
+  if (!session) throw errorWithCode('FAILED_PRECONDITION', 'call Login first');
+  return session;
 };
 
 const logFlow = (ctx, action, details) => {
@@ -232,12 +246,45 @@ const fetchWithStatus = async (url, init, ctx) => {
 };
 
 const throwForStatus = (httpStatus, httpBody) => {
+  const bodyText = String(httpBody ?? '');
   const err = errorWithCode(
     httpStatus === 0 ? 'UNAVAILABLE' : 'FAILED_PRECONDITION',
-    `upstream http ${httpStatus}: ${httpBody}`,
+    `upstream http ${httpStatus}`,
   );
-  err.response = { http_status: httpStatus, http_body: httpBody };
+  err.response = { http_status: httpStatus, http_body: '', http_body_length: bodyText.length };
   throw err;
+};
+
+const normalizeLoginResult = (parsed) => {
+  if (Array.isArray(parsed?.result)) return parsed.result[0];
+  if (parsed?.result && typeof parsed.result === 'object') return parsed.result;
+  return null;
+};
+
+const extractSessionFromLogin = (username, lang, httpStatus, httpBody) => {
+  if (httpStatus < 200 || httpStatus >= 300) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(String(httpBody ?? ''));
+  } catch {
+    return null;
+  }
+  if (parsed?.success === false) return null;
+  const result = normalizeLoginResult(parsed);
+  if (!result || typeof result !== 'object') return null;
+  const token = toTrimmedString(pickFirst(result, ['token']));
+  const role = toTrimmedString(pickFirst(result, ['role']));
+  const vsysId = toTrimmedString(pickFirst(result, ['vsysId', 'vsys_id']));
+  const fromrootvsys = toTrimmedString(pickFirst(result, ['fromrootvsys']));
+  if (!token) return null;
+  return {
+    fromrootvsys,
+    role,
+    vsysId,
+    token,
+    username,
+    lang: lang || DEFAULT_LANG,
+  };
 };
 
 const handleLogin = async (req, ctx) => {
@@ -255,14 +302,16 @@ const handleLogin = async (req, ctx) => {
     body: JSON.stringify(buildLoginPayload(username, password, lang)),
   }, callCtx);
 
-  if (httpStatus >= 200 && httpStatus < 300) return { http_status: httpStatus, http_body: httpBody };
+  const session = extractSessionFromLogin(username, lang, httpStatus, httpBody);
+  if (session) setSession(callCtx, host, session);
+  if (httpStatus >= 200 && httpStatus < 300) return { http_status: httpStatus, http_body: '' };
   throwForStatus(httpStatus, httpBody);
 };
 
 const handleCreateAddrGroup = async (req, ctx) => {
   const callCtx = resolveCallContext(ctx);
   const host = requireHost(callCtx);
-  const cookies = requireCookies(req);
+  const session = requireSession(callCtx, host);
   const addrGroups = normalizeAddrGroups(req?.addr_groups);
   if (!addrGroups) throw errorWithCode('INVALID_ARGUMENT', 'addr_groups is required and must be non-empty');
   const url = `${host}/rest/doc/addrbook`;
@@ -270,18 +319,19 @@ const handleCreateAddrGroup = async (req, ctx) => {
   logFlow(callCtx, 'CreateAddrGroup', { url, groups: addrGroups.length });
   const { httpStatus, httpBody } = await fetchWithStatus(url, {
     method: 'POST',
-    headers: buildHeaders(callCtx, { Cookie: buildCookieHeader(cookies) }),
+    headers: buildHeaders(callCtx, { Cookie: buildCookieHeader(session) }),
     body: JSON.stringify(addrGroups),
   }, callCtx);
 
   if (httpStatus >= 200 && httpStatus < 300) return { http_status: httpStatus, http_body: httpBody };
+  if (httpStatus === 401 || httpStatus === 403) clearSession(callCtx, host);
   throwForStatus(httpStatus, httpBody);
 };
 
 const handleUpdateAddrGroup = async (req, ctx) => {
   const callCtx = resolveCallContext(ctx);
   const host = requireHost(callCtx);
-  const cookies = requireCookies(req);
+  const session = requireSession(callCtx, host);
   const addrGroups = normalizeAddrGroups(req?.addr_groups);
   if (!addrGroups) throw errorWithCode('INVALID_ARGUMENT', 'addr_groups is required and must be non-empty');
   const url = `${host}/rest/doc/addrbook`;
@@ -289,18 +339,19 @@ const handleUpdateAddrGroup = async (req, ctx) => {
   logFlow(callCtx, 'UpdateAddrGroup', { url, groups: addrGroups.length });
   const { httpStatus, httpBody } = await fetchWithStatus(url, {
     method: 'PUT',
-    headers: buildHeaders(callCtx, { Cookie: buildCookieHeader(cookies) }),
+    headers: buildHeaders(callCtx, { Cookie: buildCookieHeader(session) }),
     body: JSON.stringify(addrGroups),
   }, callCtx);
 
   if (httpStatus >= 200 && httpStatus < 300) return { http_status: httpStatus, http_body: httpBody };
+  if (httpStatus === 401 || httpStatus === 403) clearSession(callCtx, host);
   throwForStatus(httpStatus, httpBody);
 };
 
 const handleQueryAddrGroup = async (req, ctx) => {
   const callCtx = resolveCallContext(ctx);
   const host = requireHost(callCtx);
-  const cookies = requireCookies(req);
+  const session = requireSession(callCtx, host);
   const name = toTrimmedString(req?.name);
   if (!name) throw errorWithCode('INVALID_ARGUMENT', 'name is required');
   const limit = toInteger(firstDefined(req?.limit, DEFAULT_LIMIT), DEFAULT_LIMIT);
@@ -316,10 +367,11 @@ const handleQueryAddrGroup = async (req, ctx) => {
   logFlow(callCtx, 'QueryAddrGroup', { url, name, limit });
   const { httpStatus, httpBody } = await fetchWithStatus(url, {
     method: 'GET',
-    headers: buildHeaders(callCtx, { Cookie: buildCookieHeader(cookies) }),
+    headers: buildHeaders(callCtx, { Cookie: buildCookieHeader(session) }),
   }, callCtx);
 
   if (httpStatus >= 200 && httpStatus < 300) return { http_status: httpStatus, http_body: httpBody };
+  if (httpStatus === 401 || httpStatus === 403) clearSession(callCtx, host);
   throwForStatus(httpStatus, httpBody);
 };
 
@@ -345,12 +397,19 @@ export const _test = {
   buildCookieHeader,
   buildLoginPayload,
   buildTlsOptions,
+  clearAllSessions,
+  clearSession,
   errorWithCode,
+  extractSessionFromLogin,
+  getInstanceKey,
+  getSession,
   normalizeAddrGroups,
+  requireSession,
   resolveHost,
   resolvePassword,
   resolveTimeoutMs,
   resolveUsername,
+  setSession,
   throwForStatus,
   toInteger,
 };

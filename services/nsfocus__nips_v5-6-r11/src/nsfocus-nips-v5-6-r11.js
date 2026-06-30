@@ -51,9 +51,9 @@ const normalizeBaseUrl = (value) => {
 };
 
 const mergedBindings = (ctx = {}) => ({
+  ...(ctx?.bindings ?? {}),
   ...(ctx?.config ?? {}),
   ...(ctx?.secret ?? {}),
-  ...(ctx?.bindings ?? {}),
 });
 
 const resolveCallContext = (ctx = {}) => ({
@@ -200,6 +200,18 @@ const fetchJsonEvenOnHttpError = async (ctx, url, init = {}) => {
   return { status: toInteger(res.status, 0), text, json, res };
 };
 
+const pickCredential = (callCtx, fieldNames, fieldLabel) => {
+  const secret = callCtx?.secret || {};
+  const config = callCtx?.config || {};
+  const bindings = callCtx?.bindings || {};
+  for (const field of fieldNames) {
+    const value = firstDefined(secret[field], config[field], bindings[field]);
+    const text = String(unwrapScalar(value) ?? '').trim();
+    if (text) return text;
+  }
+  throw errorWithCode('INVALID_ARGUMENT', `${fieldLabel} is required`);
+};
+
 const getSetCookies = (res) => {
   const headers = res?.headers;
   if (headers && typeof headers.getSetCookie === 'function') {
@@ -246,7 +258,7 @@ const buildSignQuery = (session, restUriPath, extra = {}) => {
   };
 };
 
-const toNipsResponse = ({ status, text, json }) => {
+const toNipsResponse = ({ status, json }) => {
   const code = toInteger(json?.code, 0);
   const message = String(json?.message ?? '');
   return {
@@ -254,19 +266,16 @@ const toNipsResponse = ({ status, text, json }) => {
     message,
     data: toValue(json?.data),
     http_status: toInteger(status, 0),
-    raw_body: String(text ?? ''),
-    raw_json: toValue(json),
+    raw_body: '',
+    raw_json: undefined,
   };
 };
 
 const handleLogin = async (req, ctx) => {
   const callCtx = resolveCallContext(ctx);
   const host = requireHost(callCtx);
-  const bindings = callCtx.bindings || {};
-  const username = String(firstDefined(req?.username, bindings.user, bindings.username, '') || '').trim();
-  const password = String(firstDefined(req?.password, bindings.password, '') || '').trim();
-  if (!username) throw errorWithCode('INVALID_ARGUMENT', 'username is required');
-  if (!password) throw errorWithCode('INVALID_ARGUMENT', 'password is required');
+  const username = pickCredential(callCtx, ['user', 'username'], 'username');
+  const password = pickCredential(callCtx, ['password'], 'password');
   const lang = String(firstDefined(req?.lang, 'zh_CN') || 'zh_CN').trim() || 'zh_CN';
   const inst = getInstanceId(callCtx);
 
@@ -301,12 +310,12 @@ const handleLogin = async (req, ctx) => {
     return {
       code,
       message,
-      data: toValue(json?.data),
-      api_key: apiKey,
-      security_key: securityKey,
+      data: undefined,
+      api_key: '',
+      security_key: '',
       http_status: toInteger(status, 0),
-      raw_body: String(text ?? ''),
-      raw_json: toValue(json),
+      raw_body: '',
+      raw_json: undefined,
     };
   })().finally(() => {
     loginInFlightByInstanceId.delete(inst);

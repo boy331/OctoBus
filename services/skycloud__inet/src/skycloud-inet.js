@@ -74,8 +74,8 @@ const normalizeBaseUrl = (value, allowHttp = false) => {
 
 const mergedBindings = (ctx = {}) => ({
   ...(ctx.config ?? {}),
-  ...(ctx.secret ?? {}),
   ...(ctx.bindings ?? {}),
+  ...(ctx.secret ?? {}),
 });
 
 const resolveCallContext = (ctx = {}) => ({
@@ -165,9 +165,8 @@ const httpPostJson = async (ctx, url, body, opts = {}) => {
 };
 
 const requireHost = (ctx = {}) => {
-  const req = ctx.req || {};
   const bindings = ctx.bindings || {};
-  const rawHost = firstDefined(req.connection?.host, req.host, req.base_url, req.baseUrl, bindings.host, bindings.restBaseUrl, bindings.baseUrl);
+  const rawHost = firstDefined(bindings.host, bindings.restBaseUrl, bindings.baseUrl);
   const allowHttp = toBoolean(bindings.allowHttpBaseUrl) || toBoolean(bindings.allowHttpHost) || toBoolean(bindings.allowHttpUrl);
   const host = normalizeBaseUrl(rawHost, allowHttp);
   if (!host) throw errorWithCode('INVALID_ARGUMENT', 'host/restBaseUrl must be an https URL');
@@ -175,17 +174,15 @@ const requireHost = (ctx = {}) => {
 };
 
 const requireUsername = (ctx = {}) => {
-  const req = ctx.req || {};
   const bindings = ctx.bindings || {};
-  const username = unwrapString(firstDefined(req.connection?.username, req.username, req.user, bindings.username, bindings.user));
+  const username = unwrapString(firstDefined(bindings.username, bindings.user));
   if (!username) throw errorWithCode('INVALID_ARGUMENT', 'username is required');
   return username;
 };
 
 const requirePassword = (ctx = {}) => {
-  const req = ctx.req || {};
   const bindings = ctx.bindings || {};
-  const password = unwrapString(firstDefined(req.connection?.password, req.password, bindings.password));
+  const password = unwrapString(firstDefined(bindings.password));
   if (!password) throw errorWithCode('INVALID_ARGUMENT', 'password is required');
   return password;
 };

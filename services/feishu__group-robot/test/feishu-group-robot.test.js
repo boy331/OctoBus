@@ -17,12 +17,14 @@ const originalConsoleLog = console.log;
 
 const buildCtx = (overrides = {}) => ({
   bindings: {
-    webhook: 'http://localhost:18080/open-apis/bot/v2/hook/test-token',
     headers: {},
     ...(overrides.bindings || {}),
   },
   config: overrides.config || {},
-  secret: overrides.secret || {},
+  secret: {
+    webhook: 'http://localhost:18080/open-apis/bot/v2/hook/test-token',
+    ...(overrides.secret || {}),
+  },
   limits: { timeoutMs: 10_000, ...(overrides.limits || {}) },
   meta: { instance_id: 'inst', request_id: 'req', ...(overrides.meta || {}) },
   req: overrides.req || {},
@@ -40,7 +42,7 @@ test.afterEach(() => {
 
 test('SendTextMessage requires webhook binding and message', async () => {
   await assert.rejects(
-    () => rpcdef(buildCtx({ bindings: { webhook: '' }, req: { message: 'test' } }))[METHOD_SEND_TEXT_PATH](),
+    () => rpcdef(buildCtx({ secret: { webhook: '' }, req: { message: 'test' } }))[METHOD_SEND_TEXT_PATH](),
     (err) => {
       assert.ok(err instanceof GrpcError);
       assert.equal(err.code, grpcStatus.INVALID_ARGUMENT);
@@ -50,11 +52,11 @@ test('SendTextMessage requires webhook binding and message', async () => {
     },
   );
   await assert.rejects(
-    () => rpcdef(buildCtx({ bindings: { webhook: 'invalid-url' }, req: { message: 'test' } }))[METHOD_SEND_TEXT_PATH](),
+    () => rpcdef(buildCtx({ secret: { webhook: 'invalid-url' }, req: { message: 'test' } }))[METHOD_SEND_TEXT_PATH](),
     /webhook is required/,
   );
   await assert.rejects(
-    () => rpcdef(buildCtx({ bindings: { webhook: '   ' }, req: { message: 'test' } }))[METHOD_SEND_TEXT_PATH](),
+    () => rpcdef(buildCtx({ secret: { webhook: '   ' }, req: { message: 'test' } }))[METHOD_SEND_TEXT_PATH](),
     /webhook is required/,
   );
   await assert.rejects(
@@ -158,9 +160,12 @@ test('message aliases, trimming, custom headers, and TLS flags map correctly', a
   };
 
   await rpcdef(buildCtx({
-    bindings: {
+    secret: {
       webhook: '',
       webhook_url: 'https://open.feishu.cn/open-apis/bot/v2/hook/token',
+    },
+    bindings: {
+      webhook_url: 'https://open.feishu.cn/open-apis/bot/v2/hook/legacy-token',
       headers: { 'X-Custom': 'value' },
       skipTlsVerify: true,
     },
@@ -188,11 +193,14 @@ test('SDK handler merges config and uses request alias', async () => {
 
   const res = await handlers[METHOD_SEND_TEXT_FULL]({
     config: {
-      webhookUrl: 'https://open.feishu.cn/open-apis/bot/v2/hook/sdk-token',
       timeout_ms: 3100,
+    },
+    secret: {
+      webhook: 'https://open.feishu.cn/open-apis/bot/v2/hook/sdk-token',
     },
     request: {
       text: 'from sdk',
+      webhook: 'https://open.feishu.cn/open-apis/bot/v2/hook/request-token',
     },
   });
 
@@ -214,7 +222,10 @@ test('helper defaults and logger fallback are stable', async () => {
   assert.equal(_test.coerceString({ value: { value: 'nested' } }), 'nested');
   assert.equal(_test.hasOwn(null, 'x'), false);
   assert.equal(_test.firstDefined(undefined, null, 'x'), 'x');
-  assert.deepEqual(_test.mergedBindings({ config: { a: 1 }, secret: { b: 2 }, bindings: { c: 3 } }), { a: 1, b: 2, c: 3 });
+  assert.deepEqual(_test.mergedBindings({ config: { a: 1, webhook: 'config' }, secret: { b: 2, webhook: 'secret' }, bindings: { c: 3, webhook: 'binding' } }), { a: 1, b: 2, c: 3, webhook: 'secret' });
+  assert.equal(_test.resolveWebhook({ request: { webhook: 'request' }, secret: { webhook: 'secret' }, config: { webhook: 'config' }, bindings: { webhook: 'binding' } }), 'secret');
+  assert.equal(_test.resolveWebhook({ secret: {}, config: { webhook: 'config' }, bindings: { webhook: 'binding' } }), 'config');
+  assert.equal(_test.resolveWebhook({ secret: {}, config: {}, bindings: { webhook: 'binding' } }), 'binding');
   assert.deepEqual(_test.resolveCallContext({ req: null, request: null }).req, {});
   assert.equal(_test.resolveTimeoutMs({ bindings: { timeoutMs: -1 }, limits: { timeoutMs: 0 } }), 5000);
   assert.deepEqual(_test.buildTlsOptions({}), {});

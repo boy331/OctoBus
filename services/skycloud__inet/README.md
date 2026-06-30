@@ -33,7 +33,7 @@ Secret fields:
 - `username` or `user`
 - `password`
 
-Request `connection` can override host and credentials for a single call.
+Deprecated request `connection` fields are ignored for host and credentials. Configure host in instance config and credentials in instance secret.
 
 ## Import
 

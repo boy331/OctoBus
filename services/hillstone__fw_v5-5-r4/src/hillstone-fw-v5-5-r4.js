@@ -18,6 +18,8 @@ export const DEFAULT_TIMEOUT_MS = 5000;
 export const DEFAULT_LIMIT = 50;
 export const DEFAULT_PAGE = 1;
 
+const SESSION_CACHE = new Map();
+
 const grpcCodeFor = (code) => ({
   FAILED_PRECONDITION: grpcStatus.FAILED_PRECONDITION,
   INVALID_ARGUMENT: grpcStatus.INVALID_ARGUMENT,
@@ -50,6 +52,8 @@ const pickFirst = (source, keys) => {
 const pickRequestOrBinding = (req, ctx, requestKeys, bindingKeys = requestKeys) =>
   firstDefined(pickFirst(req, requestKeys), pickFirst(ctx?.bindings ?? {}, bindingKeys));
 
+const pickBinding = (ctx, bindingKeys) => pickFirst(mergedBindings(ctx), bindingKeys);
+
 const toTrimmedString = (value) => {
   const raw = unwrapScalar(value);
   if (raw === undefined || raw === null) return '';
@@ -78,8 +82,8 @@ const requireHost = (value) => {
 
 const mergedBindings = (ctx = {}) => ({
   ...(ctx?.config ?? {}),
-  ...(ctx?.secret ?? {}),
   ...(ctx?.bindings ?? {}),
+  ...(ctx?.secret ?? {}),
 });
 
 const resolveCallContext = (ctx = {}) => ({
@@ -113,11 +117,13 @@ const buildHeaders = (ctx, extra = {}) => ({
 });
 
 const throwStructuredError = (code, message, options = {}) => {
+  const bodyText = String(options.httpBody ?? '');
   const payload = {
     code,
     message,
     http_status: Number(options.httpStatus ?? 0),
-    http_body: String(options.httpBody ?? ''),
+    http_body: '',
+    http_body_length: bodyText.length,
   };
   if (options.reason) payload.reason = String(options.reason);
   throw errorWithCode(code, JSON.stringify(payload));
@@ -188,6 +194,29 @@ const buildCookieHeader = (cookie) => {
   return pairs.map(([key, value]) => `${key}=${value}`).join('; ');
 };
 
+const getInstanceKey = (ctx) => String(ctx?.meta?.instance_id || ctx?.meta?.instanceId || 'default');
+
+const getInstanceSessionMap = (ctx) => {
+  const key = getInstanceKey(ctx);
+  let map = SESSION_CACHE.get(key);
+  if (!map) {
+    map = new Map();
+    SESSION_CACHE.set(key, map);
+  }
+  return map;
+};
+
+const getSession = (ctx, host) => getInstanceSessionMap(ctx).get(host);
+const setSession = (ctx, host, session) => getInstanceSessionMap(ctx).set(host, session);
+const clearSession = (ctx, host) => getInstanceSessionMap(ctx).delete(host);
+const clearAllSessions = () => SESSION_CACHE.clear();
+
+const requireSession = (ctx, host) => {
+  const session = getSession(ctx, host);
+  if (!session) throw errorWithCode('FAILED_PRECONDITION', 'call Login first');
+  return session;
+};
+
 const mapAddressBookIP = (item) => ({
   ip_addr: requireString(pickFirst(item, ['ip_addr', 'ipAddr']), 'address_books[].ip[].ip_addr'),
   netmask: requireString(pickFirst(item, ['netmask']), 'address_books[].ip[].netmask'),
@@ -230,8 +259,8 @@ const buildAddressBooks = (value) => {
 };
 
 const buildLoginPayload = (req, ctx) => ({
-  userName: requireString(pickRequestOrBinding(req, ctx, ['user_name', 'userName']), 'user_name'),
-  password: requireString(pickRequestOrBinding(req, ctx, ['password']), 'password'),
+  userName: requireString(pickBinding(ctx, ['user_name', 'userName', 'username', 'user']), 'user_name'),
+  password: requireString(pickBinding(ctx, ['password']), 'password'),
   ifVsysId: toTrimmedString(pickFirst(req, ['if_vsys_id', 'ifVsysId'])) || DEFAULT_IF_VSYS_ID,
   vrId: toTrimmedString(pickFirst(req, ['vr_id', 'vrId'])) || DEFAULT_VR_ID,
   lang: toTrimmedString(pickFirst(req, ['lang'])) || DEFAULT_LANG,
@@ -251,34 +280,68 @@ const buildQueryUrl = (host, req) => {
   return `${host}/rest/doc/addrbook?query=${encodeURIComponent(JSON.stringify(query))}`;
 };
 
+const normalizeLoginResult = (parsed) => {
+  if (Array.isArray(parsed?.result)) return parsed.result[0];
+  if (parsed?.result && typeof parsed.result === 'object') return parsed.result;
+  return null;
+};
+
+const extractSessionFromLogin = (ctx, httpStatus, httpBody, lang) => {
+  if (httpStatus < 200 || httpStatus >= 300) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(String(httpBody ?? ''));
+  } catch {
+    return null;
+  }
+  if (parsed?.success === false) return null;
+  const result = normalizeLoginResult(parsed);
+  if (!result || typeof result !== 'object') return null;
+  const token = toTrimmedString(pickFirst(result, ['token']));
+  if (!token) return null;
+  return {
+    fromrootvsys: toTrimmedString(pickFirst(result, ['fromrootvsys'])),
+    role: toTrimmedString(pickFirst(result, ['role'])),
+    vsysId: toTrimmedString(pickFirst(result, ['vsys_id', 'vsysId'])),
+    token,
+    username: requireString(pickBinding(ctx, ['user_name', 'userName', 'username', 'user']), 'user_name'),
+    lang: lang || DEFAULT_LANG,
+  };
+};
+
 const runLogin = async (req, ctx) => {
   const callCtx = resolveCallContext(ctx);
   const host = requireHost(pickRequestOrBinding(req, callCtx, ['host']));
-  return fetchText(callCtx, `${host}/rest/doc/login`, {
+  const lang = toTrimmedString(pickFirst(req, ['lang'])) || DEFAULT_LANG;
+  const response = await fetchText(callCtx, `${host}/rest/doc/login`, {
     method: 'POST',
     headers: buildHeaders(callCtx),
     body: JSON.stringify(buildLoginPayload(req, callCtx)),
   });
+  const session = extractSessionFromLogin(callCtx, response.http_status, response.http_body, lang);
+  if (session) setSession(callCtx, host, session);
+  return { http_status: response.http_status, http_body: '' };
 };
 
 const runCreateAddressGroup = async (req, ctx) => {
   const callCtx = resolveCallContext(ctx);
   const host = requireHost(pickRequestOrBinding(req, callCtx, ['host']));
-  const cookie = buildCookieContext(pickFirst(req, ['cookie']) || {});
-  return fetchText(callCtx, `${host}/rest/doc/addrbook`, {
+  const session = requireSession(callCtx, host);
+  const response = await fetchText(callCtx, `${host}/rest/doc/addrbook`, {
     method: 'POST',
-    headers: buildHeaders(callCtx, { Cookie: buildCookieHeader(cookie) }),
+    headers: buildHeaders(callCtx, { Cookie: buildCookieHeader(session) }),
     body: JSON.stringify(buildAddressBooks(pickFirst(req, ['address_books', 'addressBooks']))),
   });
+  return response;
 };
 
 const runUpdateAddressGroup = async (req, ctx) => {
   const callCtx = resolveCallContext(ctx);
   const host = requireHost(pickRequestOrBinding(req, callCtx, ['host']));
-  const cookie = buildCookieContext(pickFirst(req, ['cookie']) || {});
+  const session = requireSession(callCtx, host);
   return fetchText(callCtx, `${host}/rest/doc/addrbook`, {
     method: 'PUT',
-    headers: buildHeaders(callCtx, { Cookie: buildCookieHeader(cookie) }),
+    headers: buildHeaders(callCtx, { Cookie: buildCookieHeader(session) }),
     body: JSON.stringify(buildAddressBooks(pickFirst(req, ['address_books', 'addressBooks']))),
   });
 };
@@ -286,10 +349,10 @@ const runUpdateAddressGroup = async (req, ctx) => {
 const runQueryAddressGroup = async (req, ctx) => {
   const callCtx = resolveCallContext(ctx);
   const host = requireHost(pickRequestOrBinding(req, callCtx, ['host']));
-  const cookie = buildCookieContext(pickFirst(req, ['cookie']) || {});
+  const session = requireSession(callCtx, host);
   return fetchText(callCtx, buildQueryUrl(host, req), {
     method: 'GET',
-    headers: buildHeaders(callCtx, { Cookie: buildCookieHeader(cookie) }),
+    headers: buildHeaders(callCtx, { Cookie: buildCookieHeader(session) }),
   });
 };
 
@@ -325,10 +388,15 @@ rpcdef.__test__ = {
   buildLoginPayload,
   buildQueryUrl,
   buildTlsOptions,
+  clearAllSessions,
+  clearSession,
   CONTENT_TYPE,
   errorWithCode,
+  extractSessionFromLogin,
   fetchText,
   firstDefined,
+  getInstanceKey,
+  getSession,
   hasOwn,
   mapAddressBook,
   mapAddressBookEntry,
@@ -336,10 +404,12 @@ rpcdef.__test__ = {
   mapAddressBookIP,
   mapAddressBookRange,
   pickFirst,
+  pickBinding,
   pickRequestOrBinding,
   readInteger,
   registerHandlers,
   requireHost,
+  requireSession,
   requireString,
   resolveCallContext,
   resolveTimeoutMs,
@@ -347,6 +417,7 @@ rpcdef.__test__ = {
   runLogin,
   runQueryAddressGroup,
   runUpdateAddressGroup,
+  setSession,
   throwForHttpStatus,
   throwStructuredError,
   toTrimmedString,

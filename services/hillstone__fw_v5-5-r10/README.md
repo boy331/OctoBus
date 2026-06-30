@@ -22,7 +22,7 @@ octobus service import --id hillstone-fw-v5-5-r10 ./services//hillstone__fw_v5-5
 
 ## Configuration
 
-Every RPC accepts `host` in the request for legacy compatibility. New instances may also place `host`, `username`, and `password` in config/secret bindings.
+Every RPC accepts `host` in the request for legacy compatibility. New instances should place `username` in config or secret and `password` in secret. Deprecated `LoginRequest.username` and `LoginRequest.password` are ignored by the handler.
 
 ```json
 {
@@ -50,7 +50,7 @@ Every RPC accepts `host` in the request for legacy compatibility. New instances 
 
 ## Behavior Notes
 
-- `Login` posts fixed Hillstone login fields and caches the latest successful session by OctoBus instance and host.
+- `Login` posts fixed Hillstone login fields and caches the latest successful session by OctoBus instance and host. Its response only returns HTTP status and does not expose the upstream token or raw login body.
 - Address-group mutation and query RPCs require a prior successful `Login` for the same instance and host.
 - Upstream HTTP failures still return gRPC OK and preserve upstream `http_status` and response body semantics, matching the legacy service.
 - HTTP 401 and 403 on address-book calls clear the cached session.

@@ -5,28 +5,36 @@ This package preserves legacy gRPC package and method names where applicable.
 ## Import
 
 ```bash
-octobus service import --id topsec-fw-5u ./services//topsec__fw-5u
+octobus service import --id topsec-fw-5u ./services/topsec__fw-5u
 ```
+
+## Instance Configuration
+
+`config.schema.json` contains non-sensitive connection options:
+
+- `host`: TopSec FW 5U WebUI base URL, preferably `https://host:port`.
+- `timeoutMs`: HTTP timeout in milliseconds.
+- `skipTlsVerify` / `tlsInsecureSkipVerify`: compatibility TLS verification controls for private deployments.
+- `allow_http` / `allowHttp`: allow plain HTTP for local mocks or lab environments.
+- `headers`: optional additional HTTP headers.
+
+`secret.schema.json` contains credentials:
+
+- `username`: WebUI login username.
+- `password`: WebUI login password.
 
 ## Behavior
 
-- `Login` maps to `POST /home/login/`; the service encrypts plaintext password with AES-128-CBC, key and IV `1111111111111111`, zero padding, Base64 output, and outer single quotes.
-- `Refresh` maps to `POST /home/index/?userMark=...`.
-- `AddToBlacklist` maps to `POST /home/default/blackListSpread/addTuple/?userMark=...` and handles exactly one IP.
-- `RemoveFromBlacklist` maps to `POST /home/default/blackListSpread/deleteLots/?userMark=...` and handles exactly one IP.
-- `Logout` maps to `GET /home/index/logout/?userMark=...&token=...`.
-- TopSec token-prefixed bodies in the form `?{token}---{base64-json}` are decoded and returned as `raw_json`.
+- `Login` maps to `POST /home/login/` and encrypts the password internally with the device AES-128-CBC scheme.
+- `Refresh`, `AddToBlacklist`, `RemoveFromBlacklist`, and `Logout` use an internal session cache isolated by service, instance, host, and username.
+- `AddToBlacklist` and `RemoveFromBlacklist` take only the target IP plus optional host/TLS flags. Request `session`, `token`, `cookie`, `username`, and `password` fields are deprecated and ignored by SDK handlers.
 - Duplicate add results such as `黑名单条目已存在` and missing remove results such as `黑名单索引不存在` are treated as idempotent success.
-
-## Session
-
-`Login` returns an explicit `SessionContext`. Callers pass the latest session to `Refresh`, `AddToBlacklist`, `RemoveFromBlacklist`, and `Logout`. Token rotation is reflected in the returned session.
+- Responses and errors do not return upstream raw bodies, raw JSON, cookies, tokens, session state, or parsed login payloads.
 
 ## Local Checks
 
 ```bash
 cd services
 npm run validate -- --service-dir topsec__fw-5u
-npm test -- --service-dir topsec__fw-5u --coverage
-npm run pack:check
+npm test -- --service-dir topsec__fw-5u
 ```

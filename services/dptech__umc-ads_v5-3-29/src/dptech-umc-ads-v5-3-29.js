@@ -62,8 +62,8 @@ const normalizeBaseUrl = (value) => {
 
 const mergedBindings = (ctx = {}) => ({
   ...(ctx?.config ?? {}),
-  ...(ctx?.secret ?? {}),
   ...(ctx?.bindings ?? {}),
+  ...(ctx?.secret ?? {}),
 });
 
 const resolveCallContext = (ctx = {}) => ({
@@ -126,11 +126,7 @@ const requireSession = (ctx, host) => {
   return session;
 };
 
-const resolveUpstreamToken = (req, ctx, host) => {
-  const requestToken = unwrapString(firstDefined(req?.token, req?.umc_token, req?.umcToken)).trim();
-  if (requestToken) {
-    return { token: requestToken, fromCache: false };
-  }
+const resolveUpstreamToken = (_req, ctx, host) => {
   const session = requireSession(ctx, host);
   return { token: session.token, fromCache: true };
 };
@@ -329,7 +325,10 @@ const runLogin = async (ctx) => {
     });
   }
 
-  return toResponse(upstream);
+  return {
+    http_status: toInteger(upstream?.status, 0),
+    raw_body: '',
+  };
 };
 
 const runQuery = async (req, ctx) => {

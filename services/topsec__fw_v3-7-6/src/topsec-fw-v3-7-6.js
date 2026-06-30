@@ -25,6 +25,7 @@ const grpcCodeFor = (code) => ({
   FAILED_PRECONDITION: grpcStatus.FAILED_PRECONDITION,
   INVALID_ARGUMENT: grpcStatus.INVALID_ARGUMENT,
   PERMISSION_DENIED: grpcStatus.PERMISSION_DENIED,
+  UNAUTHENTICATED: grpcStatus.UNAUTHENTICATED,
   UNAVAILABLE: grpcStatus.UNAVAILABLE,
   UNKNOWN: grpcStatus.UNKNOWN,
 })[code] ?? grpcStatus.UNKNOWN;
@@ -88,16 +89,18 @@ const toArray = (value) => {
 };
 
 const mergedBindings = (ctx = {}) => ({
+  ...(ctx.bindings ?? {}),
   ...(ctx.config ?? {}),
   ...(ctx.secret ?? {}),
-  ...(ctx.bindings ?? {}),
 });
 
 const resolveCallContext = (ctx = {}) => ({
   ...ctx,
   bindings: mergedBindings(ctx),
+  config: ctx.config ?? {},
+  secret: ctx.secret ?? {},
   limits: ctx.limits ?? {},
-  meta: ctx.meta ?? {},
+  meta: ctx.meta ?? ctx.metadata ?? {},
   req: ctx.req ?? ctx.request ?? {},
 });
 
@@ -147,12 +150,11 @@ const parseKeyString = (raw) => {
 
 const ensureKeyMaterial = (req = {}, bindings = {}, keyFieldNames = [], description) => {
   const candidate = pickFirstString([
-    ...keyFieldNames.map((name) => req[name]),
     ...keyFieldNames.map((name) => bindings[name]),
   ]);
   const buffer = parseKeyString(candidate);
   if (!buffer || buffer.length === 0) {
-    throw errorWithCode('INVALID_ARGUMENT', `${description} is required via request or bindings`);
+    throw errorWithCode('UNAUTHENTICATED', `${description} is required via secret or deprecated config`);
   }
   return buffer;
 };
@@ -216,9 +218,9 @@ const gatherCookies = (headers) => {
 };
 
 const mapHttpError = (status, bodyText) => {
-  if (status === 401 || status === 403) throw errorWithCode('PERMISSION_DENIED', `upstream http ${status}: ${bodyText}`);
-  if (status >= 400 && status < 500) throw errorWithCode('FAILED_PRECONDITION', `upstream http ${status}: ${bodyText}`);
-  throw errorWithCode('UNAVAILABLE', `upstream http ${status}: ${bodyText}`);
+  if (status === 401 || status === 403) throw errorWithCode('PERMISSION_DENIED', `upstream http ${status}`);
+  if (status >= 400 && status < 500) throw errorWithCode('FAILED_PRECONDITION', `upstream http ${status}`);
+  throw errorWithCode('UNAVAILABLE', `upstream http ${status}`);
 };
 
 const fetchText = async (ctx, url, init = {}, options = {}) => {
@@ -294,6 +296,14 @@ const buildSession = (loginResult, cookie, rotatedToken) => ({
   cookie: String(cookie ?? ''),
   vendor_state: loginResult.raw || null,
 });
+
+const sessionCache = new Map();
+
+const cacheIdentity = (ctx = {}, host = '', username = '') => {
+  const serviceId = pickFirstString([ctx.serviceId, ctx.service_id, ctx.meta?.service_id, ctx.meta?.serviceId]) || 'topsec__fw_v3-7-6';
+  const instanceId = pickFirstString([ctx.instanceId, ctx.instance_id, ctx.meta?.instance_id, ctx.meta?.instanceId, ctx.workdir]) || 'default';
+  return JSON.stringify([serviceId, instanceId, host, username]);
+};
 
 const stringifyCommands = (commands) => JSON.stringify(commands);
 
@@ -397,14 +407,19 @@ const interpretOperationPayload = (payload, ips, action) => {
   return { message, succeeded_ips: [...new Set(resolvedSuccess)], failures: resolvedFailures };
 };
 
-const runLogin = async (req = {}, ctx = {}) => {
+const sanitizeStatus = (success, message) => ({
+  success: Boolean(success),
+  message: pickString(message) || (success ? 'success' : ''),
+});
+
+const runLoginSession = async (req = {}, ctx = {}) => {
   const callCtx = resolveCallContext({ ...ctx, req });
   const bindings = callCtx.bindings || {};
   const baseUrl = resolveBaseUrl(req, bindings);
-  const username = pickFirstString([req.username, req.user, bindings.user, bindings.username]);
-  if (!username) throw errorWithCode('INVALID_ARGUMENT', 'username is required via request or bindings.user');
-  const password = pickFirstString([req.password, bindings.password, callCtx.secret?.password]);
-  if (!password) throw errorWithCode('INVALID_ARGUMENT', 'password is required via request or bindings.password');
+  const username = pickFirstString([callCtx.secret?.username, bindings.user, bindings.username]);
+  if (!username) throw errorWithCode('INVALID_ARGUMENT', 'username is required via secret or config');
+  const password = pickFirstString([callCtx.secret?.password, bindings.password]);
+  if (!password) throw errorWithCode('UNAUTHENTICATED', 'password is required via secret');
   const skipTlsVerify = resolveSkipTlsVerify(req, bindings);
   const aesKey = ensureAesKey(req, bindings);
   const aesIv = ensureAesIv(req, bindings);
@@ -419,12 +434,36 @@ const runLogin = async (req = {}, ctx = {}) => {
   }, { skipTlsVerify });
   const { payload, rotatedToken } = parseTopSecPayload(text);
   const loginResult = ensureLoginSuccess(payload);
-  return {
+  const result = {
     success: true,
     message: pickString(payload.msg) || pickString(payload.message) || 'success',
-    session: buildSession(loginResult, gatherCookies(response.headers), rotatedToken),
-    raw: loginResult.raw || payload,
+    session: ensureSession(buildSession(loginResult, gatherCookies(response.headers), rotatedToken)),
   };
+  const key = cacheIdentity(callCtx, baseUrl, username);
+  sessionCache.set(key, result.session);
+  return { ...result, key, baseUrl, username };
+};
+
+const getSession = async (req = {}, ctx = {}) => {
+  const callCtx = resolveCallContext({ ...ctx, req });
+  const bindings = callCtx.bindings || {};
+  const baseUrl = resolveBaseUrl(req, bindings);
+  const username = pickFirstString([callCtx.secret?.username, bindings.user, bindings.username]);
+  if (!username) throw errorWithCode('INVALID_ARGUMENT', 'username is required via secret or config');
+  const key = cacheIdentity(callCtx, baseUrl, username);
+  const cached = sessionCache.get(key);
+  if (cached) return { key, session: ensureSession(cached), baseUrl };
+  return runLoginSession(req, callCtx);
+};
+
+const updateCachedSession = (key, session) => {
+  if (key && session) sessionCache.set(key, session);
+  return session;
+};
+
+const runLogin = async (req = {}, ctx = {}) => {
+  const result = await runLoginSession(req, ctx);
+  return sanitizeStatus(result.success, result.message);
 };
 
 const runMutation = async (req = {}, ctx = {}, action) => {
@@ -432,7 +471,7 @@ const runMutation = async (req = {}, ctx = {}, action) => {
   const bindings = callCtx.bindings || {};
   const baseUrl = resolveBaseUrl(req, bindings);
   const skipTlsVerify = resolveSkipTlsVerify(req, bindings);
-  const session = ensureSession(req.session);
+  const { key, session } = await getSession(req, callCtx);
   const ips = ensureIpList(req);
   const path = action === 'AddBlacklistIP' ? ADD_HTTP_PATH : DELETE_HTTP_PATH;
   const commands = action === 'AddBlacklistIP'
@@ -450,17 +489,17 @@ const runMutation = async (req = {}, ctx = {}, action) => {
   }, { skipTlsVerify });
   const { payload, rotatedToken } = parseTopSecPayload(text);
   const interpretation = interpretOperationPayload(payload, ips, action);
+  const nextSession = {
+    token: rotatedToken || session.token,
+    secret: session.secret,
+    user_mark: session.userMark,
+    cookie: session.cookie,
+    vendor_state: payload?.data || session.vendor_state || null,
+  };
+  updateCachedSession(key, nextSession);
   return {
     succeeded_ips: interpretation.succeeded_ips,
     failures: interpretation.failures,
-    session: {
-      token: rotatedToken || session.token,
-      secret: session.secret,
-      user_mark: session.userMark,
-      cookie: session.cookie,
-      vendor_state: payload?.data || session.vendor_state || null,
-    },
-    raw: payload,
     message: interpretation.message,
   };
 };
@@ -470,7 +509,7 @@ const runLogout = async (req = {}, ctx = {}) => {
   const bindings = callCtx.bindings || {};
   const baseUrl = resolveBaseUrl(req, bindings);
   const skipTlsVerify = resolveSkipTlsVerify(req, bindings);
-  const session = ensureSession(req.session);
+  const { key, session } = await getSession(req, callCtx);
   const codeRun = computeCodeRun(session.secret, session.token, LOGOUT_HTTP_PATH, '{}');
   const requestUrl = buildUrlWithQuery(`${baseUrl}${LOGOUT_HTTP_PATH}`, [['userMark', session.userMark], ['token', session.token], ['codeRun', codeRun]]);
   const { text } = await fetchText(callCtx, requestUrl, {
@@ -481,7 +520,8 @@ const runLogout = async (req = {}, ctx = {}) => {
   const success = Boolean(payload?.result);
   const message = pickString(payload?.msg) || pickString(payload?.message) || (success ? 'success' : 'logout failed');
   if (!success) throw errorWithCode('FAILED_PRECONDITION', message);
-  return { success: true, message, raw: payload };
+  sessionCache.delete(key);
+  return sanitizeStatus(true, message);
 };
 
 export function rpcdef(ctx = {}) {
@@ -495,10 +535,10 @@ export function rpcdef(ctx = {}) {
 }
 
 export const handlers = {
-  [METHOD_LOGIN_FULL]: (req, ctx = {}) => runLogin(req, ctx),
-  [METHOD_ADD_FULL]: (req, ctx = {}) => runMutation(req, ctx, 'AddBlacklistIP'),
-  [METHOD_DELETE_FULL]: (req, ctx = {}) => runMutation(req, ctx, 'DeleteBlacklistIP'),
-  [METHOD_LOGOUT_FULL]: (req, ctx = {}) => runLogout(req, ctx),
+  [METHOD_LOGIN_FULL]: (ctx = {}) => runLogin(ctx.request ?? ctx.req ?? {}, ctx),
+  [METHOD_ADD_FULL]: (ctx = {}) => runMutation(ctx.request ?? ctx.req ?? {}, ctx, 'AddBlacklistIP'),
+  [METHOD_DELETE_FULL]: (ctx = {}) => runMutation(ctx.request ?? ctx.req ?? {}, ctx, 'DeleteBlacklistIP'),
+  [METHOD_LOGOUT_FULL]: (ctx = {}) => runLogout(ctx.request ?? ctx.req ?? {}, ctx),
 };
 
 export const _test = {
@@ -506,6 +546,7 @@ export const _test = {
   buildEngineHeaders,
   buildSession,
   buildUrlWithQuery,
+  cacheIdentity,
   computeCodeRun,
   decodeBase64Json,
   encryptAesCbcZeroPad,
@@ -535,6 +576,7 @@ export const _test = {
   resolveCallContext,
   resolveSkipTlsVerify,
   resolveTimeoutMs,
+  sessionCache,
   runLogin,
   runLogout,
   runMutation,

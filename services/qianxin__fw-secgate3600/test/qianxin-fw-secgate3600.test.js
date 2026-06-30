@@ -25,12 +25,10 @@ const nextInstanceId = () => `inst-${++instanceSeq}`;
 const buildCtx = (overrides = {}) => ({
   bindings: {
     host: 'https://203.0.113.10:8443',
-    user: 'api_user',
-    password: 'SuperSecret!',
     ...(overrides.bindings || {}),
   },
   config: overrides.config || {},
-  secret: overrides.secret || {},
+  secret: { user: 'api_user', password: 'SuperSecret!', ...(overrides.secret || {}) },
   limits: { timeoutMs: 10_000, ...(overrides.limits || {}) },
   meta: { instance_id: overrides.instance_id || nextInstanceId(), request_id: 'req', ...(overrides.meta || {}) },
   req: overrides.req || {},
@@ -139,7 +137,7 @@ test('service exports defineService result and handlers', () => {
   assert.equal(typeof handlers[METHOD_LOGOUT_FULL], 'function');
 });
 
-test('Login sends request body, falls back to bindings, and caches cookie for later calls', async () => {
+test('Login sends secret credentials and caches cookie for later calls', async () => {
   const instanceId = nextInstanceId();
   let loginCaptured;
   let updateCaptured;
@@ -158,6 +156,7 @@ test('Login sends request body, falls back to bindings, and caches cookie for la
 
   const loginRes = await rpcdef(buildCtx({
     instance_id: instanceId,
+    req: { username: 'ignored-user', password: 'ignored-password' },
     bindings: { headers: { 'X-Extra': 'demo' }, skipTlsVerify: true },
   }))[LOGIN_PATH]();
 
@@ -170,9 +169,11 @@ test('Login sends request body, falls back to bindings, and caches cookie for la
   assert.deepEqual(JSON.parse(loginCaptured.init.body), { username: 'api_user', password: 'SuperSecret!' });
   assert.equal(loginRes.success, true);
   assert.equal(loginRes.result.error_code, 'success');
-  assert.equal(loginRes.result.token, 'token-123');
+  assert.equal(loginRes.result.token, '');
   assert.equal(loginRes.http_status, 200);
-  assert.equal(loginRes.headers.find((item) => item.key === 'set-cookie').values.length, 2);
+  assert.equal(loginRes.raw_body, '');
+  assert.equal(loginRes.raw_json, undefined);
+  assert.deepEqual(loginRes.headers, []);
 
   await rpcdef(buildCtx({ instance_id: instanceId, req: buildUpdateRequest() }))[UPDATE_PATH]();
 
@@ -190,12 +191,12 @@ test('Login validates host, username, password, and malformed schema', async () 
     (err) => assert.match(err.message, /host is required/),
   );
   await expectGrpcError(
-    () => rpcdef(buildCtx({ bindings: { user: '', username: '', password: 'pw' } }))[LOGIN_PATH](),
+    () => rpcdef(buildCtx({ secret: { user: '', username: '', password: 'pw' } }))[LOGIN_PATH](),
     'INVALID_ARGUMENT',
     (err) => assert.match(err.message, /username is required/),
   );
   await expectGrpcError(
-    () => rpcdef(buildCtx({ bindings: { password: '' } }))[LOGIN_PATH](),
+    () => rpcdef(buildCtx({ secret: { password: '' } }))[LOGIN_PATH](),
     'INVALID_ARGUMENT',
     (err) => assert.match(err.message, /password is required/),
   );
@@ -310,7 +311,7 @@ test('Login business failure does not cache session', async () => {
     'set-cookie': ['SID=abc; Path=/'],
   }));
 
-  const loginRes = await rpcdef(buildCtx({ instance_id: instanceId, req: { password: 'bad' } }))[LOGIN_PATH]();
+  const loginRes = await rpcdef(buildCtx({ instance_id: instanceId, secret: { password: 'bad' } }))[LOGIN_PATH]();
   assert.equal(loginRes.success, false);
   assert.equal(loginRes.result.error_code, 'bad_password');
   await expectGrpcError(() => rpcdef(buildCtx({ instance_id: instanceId, req: buildUpdateRequest() }))[UPDATE_PATH](), 'FAILED_PRECONDITION');
@@ -356,7 +357,7 @@ test('Logout accepts 2xx empty body and clears cached session', async () => {
   assert.equal(res.http_status, 204);
   assert.equal(res.raw_body, '');
   assert.equal(res.raw_json, undefined);
-  assert.deepEqual(res.headers, [{ key: 'x-trace-id', values: ['logout-ok'] }]);
+  assert.deepEqual(res.headers, []);
   await expectGrpcError(() => rpcdef(buildCtx({ instance_id: instanceId, req: { host: 'https://203.0.113.10:8443', username: 'api_user' } }))[LOGOUT_PATH](), 'FAILED_PRECONDITION');
 });
 
@@ -372,7 +373,7 @@ test('Logout parses JSON body and rejects non-2xx empty body', async () => {
   await rpcdef(buildCtx({ instance_id: instanceId }))[LOGIN_PATH]();
   const ok = await callHandler(METHOD_LOGOUT_FULL, {}, buildCtx({ instance_id: instanceId }));
   assert.equal(ok.http_status, 200);
-  assert.deepEqual(ok.raw_json.structValue.fields.code, { numberValue: 0 });
+  assert.equal(ok.raw_json, undefined);
 
   _test.setSession(buildCtx({ instance_id: 'logout-empty' }), 'https://203.0.113.10:8443', { token: 't', cookie: 'token=t', username: 'api_user' });
   setFetch(async () => response(500, ''));
@@ -471,6 +472,14 @@ test('helpers cover parser, scalar, cookie, schema, and normalization branches',
   assert.throws(() => _test.normalizeUpdateEntries({ entries: [{ head: {}, body: { obj_addr: [] } }] }), /obj_addr must be a non-empty array/);
   assert.deepEqual(_test.toUpdateResponse(200, '{"head":{}}', {}, { head: { errmsg: 'm' } }).head.message, 'm');
   assert.equal(_test.toLoginResponse(200, '{}', {}, { success: false, result: [] }).result.error_code, '');
+  assert.deepEqual(_test.toLoginResponse(200, '{"token":"secret"}', { headers: createHeaders({ 'set-cookie': ['SID=abc'] }) }, { success: true, result: { error_code: 'success', token: 'secret' } }), {
+    success: true,
+    result: { error_code: 'success', token: '', raw: undefined },
+    http_status: 200,
+    raw_body: '',
+    raw_json: undefined,
+    headers: [],
+  });
   assert.equal(_test.toLogoutResponse(200, '', {}, undefined).raw_json, undefined);
   assert.equal(_test.errorWithCode('NOT_REAL', 'fallback').code, grpcStatus.UNKNOWN);
 });

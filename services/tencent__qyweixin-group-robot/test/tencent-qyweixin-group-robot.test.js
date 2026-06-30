@@ -21,7 +21,10 @@ const buildCtx = (overrides = {}) => ({
     ...(overrides.bindings || {}),
   },
   config: overrides.config || {},
-  secret: overrides.secret || {},
+  secret: {
+    webhook: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=token',
+    ...(overrides.secret || {}),
+  },
   limits: { timeoutMs: 10_000, ...(overrides.limits || {}) },
   meta: { instance_id: 'inst', request_id: 'req', ...(overrides.meta || {}) },
   req: overrides.req || {},
@@ -76,17 +79,17 @@ test('service exports handler and rpcdef path', () => {
 
 test('validates webhook and message', async () => {
   await expectGrpcError(
-    () => callHandler(METHOD_SEND_TEXT_FULL, { webhook: 'http://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=token', message: 'hi' }, buildCtx()),
+    () => callHandler(METHOD_SEND_TEXT_FULL, { message: 'hi' }, buildCtx({ secret: { webhook: 'http://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=token' } })),
     'INVALID_ARGUMENT',
     (err) => assert.match(err.message, /https URL/),
   );
   await expectGrpcError(
-    () => callHandler(METHOD_SEND_TEXT_FULL, { webhook: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=token', message: '' }, buildCtx()),
+    () => callHandler(METHOD_SEND_TEXT_FULL, { message: '' }, buildCtx()),
     'INVALID_ARGUMENT',
     (err) => assert.match(err.message, /message is required/),
   );
   await expectGrpcError(
-    () => callHandler(METHOD_SEND_TEXT_FULL, { message: 'hi' }, buildCtx()),
+    () => callHandler(METHOD_SEND_TEXT_FULL, { message: 'hi' }, buildCtx({ secret: { webhook: '' } })),
     'INVALID_ARGUMENT',
     (err) => assert.match(err.message, /webhook is required/),
   );
@@ -101,7 +104,7 @@ test('sends text payload with mentioned_list when mobiles are empty', async () =
 
   const result = await callHandler(METHOD_SEND_TEXT_FULL,
     {
-      webhook: { value: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=token' },
+      webhook: { value: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=request-token' },
       message: { value: 'hello' },
       mentioned_mobiles: '',
     },
@@ -122,7 +125,7 @@ test('sends text payload with mentioned_list when mobiles are empty', async () =
     text: { content: 'hello', mentioned_list: [] },
   });
   assert.equal(result.http_status_code, 200);
-  assert.match(result.http_body, /"errcode":0/);
+  assert.equal(result.http_body, '');
   assert.equal(result.errcode, 0);
   assert.equal(result.errmsg, 'ok');
 });
@@ -135,7 +138,6 @@ test('sends text payload with mentioned_mobile_list when mobiles are provided', 
   });
 
   await rpcdef(buildCtx())[METHOD_SEND_TEXT_PATH]({
-    webhook: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=token',
     message: 'hello',
     mentionedMobiles: ' 13800000001, ,13800000002 ',
   });
@@ -153,13 +155,14 @@ test('maps http errors with parsed errcode and errmsg', async () => {
   for (const [status, legacyCode] of [[401, 'PERMISSION_DENIED'], [403, 'PERMISSION_DENIED'], [404, 'FAILED_PRECONDITION'], [500, 'UNAVAILABLE'], [302, 'UNKNOWN']]) {
     setFetch(async () => response(status, { errcode: 40014, errmsg: 'invalid key' }));
     await expectGrpcError(
-      () => callHandler(METHOD_SEND_TEXT_FULL, { webhook: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=token', message: 'hello' }, buildCtx()),
+      () => callHandler(METHOD_SEND_TEXT_FULL, { message: 'hello' }, buildCtx()),
       legacyCode,
       (err) => {
         const payload = parseStructuredError(err);
         assert.equal(payload.code, legacyCode);
         assert.equal(payload.http_status_code, status);
-        assert.match(payload.http_body, /invalid key/);
+        assert.equal(payload.http_body, '');
+        assert.ok(payload.http_body_length > 0);
         assert.equal(payload.errcode, 40014);
         assert.equal(payload.errmsg, 'invalid key');
         assert.equal(payload.reason, 'http status is not 2xx');
@@ -173,12 +176,13 @@ test('maps transport and response read errors', async () => {
     throw Object.assign(new Error('outer'), { cause: new Error('connect ECONNREFUSED') });
   });
   await expectGrpcError(
-    () => callHandler(METHOD_SEND_TEXT_FULL, { webhook: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=token', message: 'hello' }, buildCtx()),
+    () => callHandler(METHOD_SEND_TEXT_FULL, { message: 'hello' }, buildCtx()),
     'UNAVAILABLE',
     (err) => {
       const payload = parseStructuredError(err);
       assert.equal(payload.http_status_code, 0);
       assert.equal(payload.http_body, '');
+      assert.equal(payload.http_body_length, 0);
       assert.match(payload.reason, /ECONNREFUSED/);
     },
   );
@@ -191,11 +195,12 @@ test('maps transport and response read errors', async () => {
     },
   }));
   await expectGrpcError(
-    () => callHandler(METHOD_SEND_TEXT_FULL, { webhook: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=token', message: 'hello' }, buildCtx()),
+    () => callHandler(METHOD_SEND_TEXT_FULL, { message: 'hello' }, buildCtx()),
     'UNAVAILABLE',
     (err) => {
       const payload = parseStructuredError(err);
       assert.equal(payload.http_status_code, 200);
+      assert.equal(payload.http_body, '');
       assert.equal(payload.reason, 'read failed');
     },
   );
@@ -205,11 +210,12 @@ test('maps invalid response body and business failure', async () => {
   for (const body of ['{"errmsg":"ok"}', 'not-json', '']) {
     setFetch(async () => response(200, body));
     await expectGrpcError(
-      () => callHandler(METHOD_SEND_TEXT_FULL, { webhook: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=token', message: 'hello' }, buildCtx()),
+      () => callHandler(METHOD_SEND_TEXT_FULL, { message: 'hello' }, buildCtx()),
       'UNKNOWN',
       (err) => {
         const payload = parseStructuredError(err);
         assert.equal(payload.http_status_code, 200);
+        assert.equal(payload.http_body, '');
         assert.equal(payload.reason, 'missing errcode in json body');
       },
     );
@@ -217,11 +223,12 @@ test('maps invalid response body and business failure', async () => {
 
   setFetch(async () => response(200, { errcode: 40001, errmsg: 'invalid' }));
   await expectGrpcError(
-    () => callHandler(METHOD_SEND_TEXT_FULL, { webhook: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=token', message: 'hello' }, buildCtx()),
+    () => callHandler(METHOD_SEND_TEXT_FULL, { message: 'hello' }, buildCtx()),
     'FAILED_PRECONDITION',
     (err) => {
       const payload = parseStructuredError(err);
       assert.equal(payload.http_status_code, 200);
+      assert.equal(payload.http_body, '');
       assert.equal(payload.errcode, 40001);
       assert.equal(payload.errmsg, 'invalid');
       assert.equal(payload.reason, 'errcode != 0');
@@ -240,6 +247,7 @@ test('helper functions cover normalization branches', async () => {
     message: 'msg',
     http_status_code: 0,
     http_body: '',
+    http_body_length: 0,
     reason: '',
   });
   assert.equal(_test.hasOwn(null, 'x'), false);
@@ -249,7 +257,8 @@ test('helper functions cover normalization branches', async () => {
   assert.equal(_test.pickFirst({ b: { value: 'two' } }, ['a', 'b']), 'two');
   assert.equal(_test.toTrimmedString(null), '');
   assert.equal(_test.requireString(' value ', 'field'), 'value');
-  assert.deepEqual(_test.mergedBindings({ config: { timeoutMs: 1 }, secret: { token: 'secret' }, bindings: { timeoutMs: 2 } }), { timeoutMs: 2, token: 'secret' });
+  assert.deepEqual(_test.mergedBindings({ config: { timeoutMs: 1, webhook: 'config' }, secret: { webhook: 'secret' }, bindings: { timeoutMs: 2, webhook: 'binding' } }), { timeoutMs: 2, webhook: 'secret' });
+  assert.equal(_test.resolveWebhook({ request: { webhook: 'request' }, secret: { webhook: 'secret' }, config: { webhook: 'config' }, bindings: { webhook: 'binding' } }), 'secret');
   assert.deepEqual(_test.resolveCallContext({ request: { message: 'req' } }).req, { message: 'req' });
   assert.equal(_test.optionalUint32({ value: '10.9' }), 10);
   assert.equal(_test.optionalUint32('bad'), undefined);
@@ -291,7 +300,6 @@ test('rpcdef falls back to context request when call request is omitted', async 
   setFetch(async () => response(200, { errcode: 0, errmsg: 'ok' }));
   const result = await rpcdef(buildCtx({
     req: {
-      webhook: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=token',
       message: 'from context',
     },
   }))[METHOD_SEND_TEXT_PATH]();
@@ -305,19 +313,19 @@ test('mock upstream handles success and simulated failures', async () => {
     setFetch(async (url, init) => nativeFetch(String(url).replace('https://', 'http://'), init));
 
     const ok = await callHandler(METHOD_SEND_TEXT_FULL,
-      { webhook: `${server.url.replace('http://', 'https://')}/cgi-bin/webhook/send?key=ok`, message: 'hello' },
-      buildCtx(),
+      { message: 'hello' },
+      buildCtx({ secret: { webhook: `${server.url.replace('http://', 'https://')}/cgi-bin/webhook/send?key=ok` } }),
     );
     assert.equal(ok.errcode, 0);
     assert.equal(server.requests.length, 1);
     assert.deepEqual(JSON.parse(server.requests[0].body), { msgtype: 'text', text: { content: 'hello', mentioned_list: [] } });
 
     await expectGrpcError(
-      () => callHandler(METHOD_SEND_TEXT_FULL, { webhook: `${server.url.replace('http://', 'https://')}/cgi-bin/webhook/send?key=bizfail`, message: 'hello' }, buildCtx()),
+      () => callHandler(METHOD_SEND_TEXT_FULL, { message: 'hello' }, buildCtx({ secret: { webhook: `${server.url.replace('http://', 'https://')}/cgi-bin/webhook/send?key=bizfail` } })),
       'FAILED_PRECONDITION',
     );
     await expectGrpcError(
-      () => callHandler(METHOD_SEND_TEXT_FULL, { webhook: `${server.url.replace('http://', 'https://')}/cgi-bin/webhook/send?key=servererr`, message: 'hello' }, buildCtx()),
+      () => callHandler(METHOD_SEND_TEXT_FULL, { message: 'hello' }, buildCtx({ secret: { webhook: `${server.url.replace('http://', 'https://')}/cgi-bin/webhook/send?key=servererr` } })),
       'UNAVAILABLE',
     );
   } finally {

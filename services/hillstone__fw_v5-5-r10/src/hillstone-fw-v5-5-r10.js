@@ -99,8 +99,8 @@ const requireHost = (value) => {
 
 const mergedBindings = (ctx = {}) => ({
   ...(ctx?.config ?? {}),
-  ...(ctx?.secret ?? {}),
   ...(ctx?.bindings ?? {}),
+  ...(ctx?.secret ?? {}),
 });
 
 const resolveCallContext = (ctx = {}) => ({
@@ -112,8 +112,8 @@ const resolveCallContext = (ctx = {}) => ({
 });
 
 const requestHost = (req, ctx) => firstDefined(req?.host, ctx?.bindings?.host);
-const requestUsername = (req, ctx) => firstDefined(req?.username, req?.user, ctx?.bindings?.username, ctx?.bindings?.user);
-const requestPassword = (req, ctx) => firstDefined(req?.password, ctx?.bindings?.password);
+const requestUsername = (_req, ctx) => firstDefined(ctx?.bindings?.username, ctx?.bindings?.user);
+const requestPassword = (_req, ctx) => firstDefined(ctx?.bindings?.password);
 const requestGroupName = (req) => firstDefined(req?.group_name, req?.groupName);
 
 const resolveTimeoutMs = (ctx) => {
@@ -209,6 +209,11 @@ const buildBodyWrapper = (text) => {
 const buildHttpResponse = (status, text) => ({
   http_status: Number(status),
   body: buildBodyWrapper(text),
+});
+
+const buildSanitizedHttpResponse = (status) => ({
+  http_status: Number(status),
+  body: buildBodyWrapper(''),
 });
 
 const fetchUpstream = async (ctx, url, init = {}) => {
@@ -335,7 +340,7 @@ const runLogin = async (req, ctx) => {
   });
   const session = extractSessionFromLogin(req, callCtx, upstream.status, upstream.text);
   if (session) setSession(callCtx, host, session);
-  return buildHttpResponse(upstream.status, upstream.text);
+  return buildSanitizedHttpResponse(upstream.status);
 };
 
 const runAddressGroupMutation = async (req, ctx, method) => {
@@ -394,6 +399,7 @@ rpcdef.__test__ = {
   buildCookieHeader,
   buildHeaders,
   buildHttpResponse,
+  buildSanitizedHttpResponse,
   buildQueryUrl,
   buildTlsOptions,
   clearAllSessions,

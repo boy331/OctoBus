@@ -13,10 +13,11 @@ The package command is `sangfor-fw-v8-0-45`, and the service root is `services/s
 
 ## Behavior
 
-- `Login` posts `{name,password}` to `/api/v1/namespaces/public/login` and returns `data.loginResult.token`.
-- `BlockIP` posts blacklist entries to `/api/batch/v1/namespaces/public/whiteblacklist` with `Cookie: token=<token>`.
+- `Login` posts `{name,password}` to `/api/v1/namespaces/public/login`, caches `data.loginResult.token` inside the OctoBus instance, and does not return the token.
+- `BlockIP` posts blacklist entries to `/api/batch/v1/namespaces/public/whiteblacklist` with the cached `Cookie: token=<token>`.
 - `UnblockIP` posts delete entries to `/api/batch/v1/namespaces/public/whiteblacklist?_method=delete`.
-- `Logout` posts `{}` to `/api/v1/namespaces/public/logout`.
+- `Logout` posts `{}` to `/api/v1/namespaces/public/logout` with the cached token and clears the local session on success.
+- Deprecated request `token`, `name`, and `password` fields are ignored for secret/session handling.
 - Block success codes are `0` and `17`; unblock success codes are `0` and `1004`.
 
 ## Configuration

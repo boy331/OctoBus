@@ -5,34 +5,33 @@ This package preserves legacy gRPC package and method names where applicable.
 ## Import
 
 ```bash
-octobus service import --id topsec-fw-2u ./services//topsec__fw-2u
+octobus service import --id topsec-fw-2u ./services/topsec__fw-2u
 ```
+
+## Instance Configuration
+
+`config.schema.json` contains non-sensitive connection options:
+
+- `host`: TopSec FW 2U WebUI base URL with `http` or `https` scheme.
+- `timeoutMs`: HTTP timeout in milliseconds.
+- `skipTlsVerify` / `tlsInsecureSkipVerify` / `insecureSkipVerify`: compatibility TLS verification controls for private deployments.
+
+`secret.schema.json` contains credentials:
+
+- `username`: WebUI login username.
+- `password`: WebUI login password.
 
 ## Behavior
 
-- `Login` maps to `POST /home/login/addNoCode/`; the service encrypts the plaintext password as AES-CBC with key and IV `ngfwrestapilogin`, zero padding, and Base64 output.
-- `ActivatePermission` maps to `POST /home/index/?userMark=...`.
-- `AddBlacklistIP` maps to `POST /home/default/blackListSpread/addTuple/?userMark=...`.
-- `DeleteBlacklistIP` maps to `POST /home/default/blackListSpread/deleteLots/?userMark=...`.
-- `Logout` maps to `GET /home/index/logout/?userMark=...&token=...`.
-- HTTP responses are returned with `status_code` and `raw_body` even for non-2xx statuses. gRPC errors are only used for invalid input, network failures, and unreadable UTF-8 response bodies.
-
-## Session
-
-Callers keep `SessionContext` between RPC calls:
-
-- `token`
-- `user_mark`
-- `cookie`
-- `secret`
-
-`Login` parses session values from the response token, response body, and cookies. `AddBlacklistIP` and `DeleteBlacklistIP` return refreshed session data when the upstream response rotates the token.
+- `Login` performs an internal login and only returns `status_code`, `success`, and `message`.
+- `ActivatePermission`, `AddBlacklistIP`, `DeleteBlacklistIP`, and `Logout` use an internal session cache isolated by service, instance, host, and username.
+- `AddBlacklistIP` and `DeleteBlacklistIP` take only the target IP list plus optional host override. Request `session`, `token`, `cookie`, `secret`, `username`, and `password` fields are deprecated and ignored by SDK handlers.
+- Responses do not return upstream raw bodies, cookies, tokens, session secrets, or parsed login payloads.
 
 ## Local Checks
 
 ```bash
 cd services
 npm run validate -- --service-dir topsec__fw-2u
-npm test -- --service-dir topsec__fw-2u --coverage
-npm run pack:check
+npm test -- --service-dir topsec__fw-2u
 ```

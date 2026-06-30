@@ -2,6 +2,8 @@
 
 This package preserves legacy gRPC package and method names where applicable.
 
+`Login` reads the management host from instance config and credentials from instance secret/config, caches the upstream session by OctoBus instance and host, and returns only `http_status`. Deprecated request cookie fields on address-group RPCs are ignored; create, update, and query use the cached session from a prior successful `Login`.
+
 ## Import
 
 ```bash

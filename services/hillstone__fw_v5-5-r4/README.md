@@ -50,8 +50,9 @@ Every RPC accepts `host` in the request for legacy compatibility. New instances 
 
 ## Behavior Notes
 
-- `Login` posts Hillstone `userName`, `password`, `ifVsysId`, `vrId`, and `lang` fields. The password is passed through unchanged.
-- Address-group create, update, and query RPCs require the caller to provide the full Hillstone cookie context.
+- `Login` posts Hillstone `userName`, `password`, `ifVsysId`, `vrId`, and `lang` fields using instance config/secret credentials. Deprecated request username/password fields are ignored.
+- `Login` caches the upstream session by OctoBus instance and host and returns only `http_status`; it does not expose the token or raw login body.
+- Address-group create, update, and query RPCs use the cached session from a prior successful `Login`. Deprecated request cookie fields are ignored.
 - Create and update serialize the full `address_books` array, including optional `range`, `entry`, and `host` arrays.
 - HTTP 2xx responses return gRPC OK with raw `http_status` and `http_body`.
 - HTTP 401 and 403 map to `PERMISSION_DENIED`; other 4xx statuses map to `FAILED_PRECONDITION`; 5xx and network failures map to `UNAVAILABLE`.

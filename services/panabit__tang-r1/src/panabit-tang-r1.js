@@ -19,6 +19,8 @@ export const LOGIN_URI = '/api/panabit.cgi/API';
 export const API_URI = '/api/panabit.cgi';
 export const IPTABLE_ROUTE = 'object@iptable';
 
+const sessionCache = new Map();
+
 const grpcCodeFor = (code) => ({
   FAILED_PRECONDITION: grpcStatus.FAILED_PRECONDITION,
   INVALID_ARGUMENT: grpcStatus.INVALID_ARGUMENT,
@@ -57,8 +59,8 @@ const normalizeBaseUrl = (url) => {
 
 const mergedBindings = (ctx = {}) => ({
   ...(ctx?.config ?? {}),
-  ...(ctx?.secret ?? {}),
   ...(ctx?.bindings ?? {}),
+  ...(ctx?.secret ?? {}),
 });
 
 const resolveCallContext = (ctx = {}) => ({
@@ -108,6 +110,11 @@ const buildTlsOptions = (bindings) => {
 
 const getInstanceId = (ctx) => String(ctx?.meta?.instance_id || ctx?.meta?.instanceId || 'unknown');
 const getRequestId = (ctx) => String(ctx?.meta?.request_id || ctx?.meta?.requestId || 'unknown');
+const buildSessionKey = (ctx, baseUrl) => `${getInstanceId(ctx)}::${baseUrl}`;
+const setSession = (ctx, baseUrl, session) => sessionCache.set(buildSessionKey(ctx, baseUrl), session);
+const getSession = (ctx, baseUrl) => sessionCache.get(buildSessionKey(ctx, baseUrl));
+const clearSession = (ctx, baseUrl) => sessionCache.delete(buildSessionKey(ctx, baseUrl));
+const clearSessionCache = () => sessionCache.clear();
 
 const buildHeaders = (ctx, extraHeaders = {}) => ({
   ...(ctx?.bindings?.headers || {}),
@@ -242,9 +249,10 @@ const fetchText = async (ctx, url, init = {}) => {
   return { status: Number(res.status) || 0, text, res };
 };
 
-const requireToken = (req) => {
-  const token = String(firstDefined(req?.api_token, req?.apiToken) || '').trim();
-  if (!token) throw errorWithCode('INVALID_ARGUMENT', 'api_token is required');
+const requireToken = (ctx) => {
+  const baseUrl = requireBaseUrl(ctx);
+  const token = String(getSession(ctx, baseUrl)?.apiToken || '').trim();
+  if (!token) throw errorWithCode('FAILED_PRECONDITION', 'call Login first');
   return token;
 };
 
@@ -292,21 +300,24 @@ const handleLogin = async (_req, ctx) => {
   });
   const json = parseJsonResponse(text);
   if (!json) throw errorWithCode('UNKNOWN', 'empty response from device');
+  if (json.code === 0 && typeof json.data === 'string' && json.data.trim()) {
+    setSession(callCtx, baseUrl, { apiToken: json.data.trim() });
+  } else {
+    clearSession(callCtx, baseUrl);
+  }
   return {
     code: typeof json.code === 'number' ? json.code : -1,
-    api_token: typeof json.data === 'string' ? json.data : '',
-    raw: toStruct(json),
+    api_token: '',
   };
 };
 
 const handleListIPTable = async (req, ctx) => {
   const callCtx = resolveCallContext(ctx);
-  const token = requireToken(req);
   const keyword = String(firstDefined(req?.keyword, '') || '').trim();
   const formFields = {
     api_route: IPTABLE_ROUTE,
     api_action: 'list_iptable',
-    api_token: token,
+    api_token: requireToken(callCtx),
   };
   if (keyword) formFields.keyword = keyword;
   const json = await panabitPost(callCtx, formFields);
@@ -324,13 +335,12 @@ const handleListIPTable = async (req, ctx) => {
 
 const handleAddIPTable = async (req, ctx) => {
   const callCtx = resolveCallContext(ctx);
-  const token = requireToken(req);
   const name = requireText(req, ['name', 'Name'], 'name');
   const json = await panabitPost(callCtx, {
     api_route: IPTABLE_ROUTE,
     api_action: 'add_iptable',
     name,
-    api_token: token,
+    api_token: requireToken(callCtx),
   });
   if (!json) return { code: 0, msg: '', raw: toStruct({}) };
   return responseFromJson(json);
@@ -338,7 +348,6 @@ const handleAddIPTable = async (req, ctx) => {
 
 const handleBlockIP = async (req, ctx) => {
   const callCtx = resolveCallContext(ctx);
-  const token = requireToken(req);
   const name = requireText(req, ['name', 'Name'], 'name');
   const id = requireText(req, ['id', 'Id'], 'id');
   const ip = requireIP(req);
@@ -348,7 +357,7 @@ const handleBlockIP = async (req, ctx) => {
     name,
     id,
     ip,
-    api_token: token,
+    api_token: requireToken(callCtx),
   });
   if (!json) return { code: 0, msg: '', raw: toStruct({}) };
   return responseFromJson(json);
@@ -356,7 +365,6 @@ const handleBlockIP = async (req, ctx) => {
 
 const handleUnblockIP = async (req, ctx) => {
   const callCtx = resolveCallContext(ctx);
-  const token = requireToken(req);
   const name = requireText(req, ['name', 'Name'], 'name');
   const id = requireText(req, ['id', 'Id'], 'id');
   const ip = requireIP(req);
@@ -366,7 +374,7 @@ const handleUnblockIP = async (req, ctx) => {
     name,
     id,
     ip,
-    api_token: token,
+    api_token: requireToken(callCtx),
   });
   if (!json) return { code: 0, msg: '', raw: toStruct({}) };
   return responseFromJson(json);
@@ -395,11 +403,15 @@ export const _test = {
   buildHeaders,
   buildMultipartBody,
   buildQueryString,
+  buildSessionKey,
   buildTlsOptions,
+  clearSession,
+  clearSessionCache,
   errorWithCode,
   fetchText,
   getInstanceId,
   getRequestId,
+  getSession,
   handleHttpError,
   isValidIP,
   isValidIPv4,
@@ -411,6 +423,7 @@ export const _test = {
   resolveCallContext,
   resolveTimeoutMs,
   responseFromJson,
+  setSession,
   toBoolean,
   toStruct,
   toValue,

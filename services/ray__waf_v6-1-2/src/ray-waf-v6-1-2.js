@@ -20,6 +20,8 @@ export const DEFAULT_REMARK = '长亭科技万象对接';
 export const DEFAULT_GROUP_ID = '0';
 export const DEFAULT_GROUP_ID_VALUE = '';
 
+const sessionCache = new Map();
+
 const grpcCodeFor = (code) => ({
   FAILED_PRECONDITION: grpcStatus.FAILED_PRECONDITION,
   INVALID_ARGUMENT: grpcStatus.INVALID_ARGUMENT,
@@ -112,6 +114,13 @@ const buildHeaders = (bindings = {}, meta = {}, extra = {}) => ({
   ...extra,
 });
 
+const getInstanceId = (ctx = {}) => String(ctx?.meta?.instance_id || ctx?.meta?.instanceId || 'unknown');
+const buildSessionKey = (ctx, host) => `${getInstanceId(ctx)}::${host}`;
+const setSession = (ctx, host, session) => sessionCache.set(buildSessionKey(ctx, host), session);
+const getSession = (ctx, host) => sessionCache.get(buildSessionKey(ctx, host));
+const clearSession = (ctx, host) => sessionCache.delete(buildSessionKey(ctx, host));
+const clearSessionCache = () => sessionCache.clear();
+
 const normalizeSuccess = (value) => {
   if (typeof value === 'boolean') return value;
   if (typeof value === 'object' && value !== null && hasOwn(value, 'value')) return normalizeSuccess(value.value);
@@ -181,8 +190,8 @@ const parseJsonBody = (text) => {
 
 const mergedBindings = (ctx = {}) => ({
   ...(ctx.config ?? {}),
-  ...(ctx.secret ?? {}),
   ...(ctx.bindings ?? {}),
+  ...(ctx.secret ?? {}),
 });
 
 const resolveCallContext = (ctx = {}) => ({
@@ -217,25 +226,26 @@ const fetchJson = async (ctx = {}, url, init = {}) => {
 };
 
 const requireHost = (ctx) => {
-  const host = resolveHost(ctx.req || {}, ctx.bindings || {});
+  const host = resolveHost({}, ctx.bindings || {});
   if (!host) throw errorWithCode('INVALID_ARGUMENT', 'host/baseUrl is required');
   return host;
 };
 
 const requireUser = (ctx) => {
-  const user = resolveUser(ctx.req || {}, ctx.bindings || {});
+  const user = resolveUser({}, ctx.bindings || {});
   if (!user) throw errorWithCode('INVALID_ARGUMENT', 'user is required');
   return user;
 };
 
 const requirePassword = (ctx) => {
-  const password = resolvePassword(ctx.req || {}, ctx.bindings || {});
+  const password = resolvePassword({}, ctx.bindings || {});
   if (!password) throw errorWithCode('INVALID_ARGUMENT', 'password is required');
   return password;
 };
 
 const requireRandom = (ctx) => {
-  const random = resolveRandom(ctx.req || {}, ctx.bindings || {});
+  const host = requireHost(ctx);
+  const random = String(getSession(ctx, host)?.random || '').trim();
   if (!random) throw errorWithCode('INVALID_ARGUMENT', 'random is required');
   return random;
 };
@@ -264,10 +274,11 @@ const handleLogin = async (req = {}, ctx = {}) => {
   if (success !== true) throw errorWithCode('FAILED_PRECONDITION', '用户登录失败');
   const random = stringifyCell(json?.random).trim();
   if (!random) throw errorWithCode('UNKNOWN', 'login response missing random');
+  setSession(callCtx, host, { random });
   const result = {
     success: true,
     success_raw: stringifyCell(json?.success),
-    random,
+    random: '',
     adminid: stringifyCell(json?.adminid),
     pwd_comp: stringifyCell(json?.pwd_comp),
     pwd_lasttime: stringifyCell(json?.pwd_lasttime),
@@ -276,7 +287,7 @@ const handleLogin = async (req = {}, ctx = {}) => {
     redirecturl: stringifyCell(json?.redirecturl),
     reminder: stringifyCell(json?.reminder),
     userauth: stringifyCell(json?.userauth),
-    raw_json: text,
+    raw_json: '',
   };
   logFlow(callCtx, 'Login', { host, user, elapsed_ms: Date.now() - started, success: true });
   return result;
@@ -407,11 +418,15 @@ export const handlers = {
 
 export const _test = {
   buildHeaders,
+  buildSessionKey,
   buildTlsOptions,
   buildUrl,
+  clearSession,
+  clearSessionCache,
   errorWithCode,
   fetchJson,
   firstDefined,
+  getSession,
   handleBlockIP,
   handleLogin,
   handleQueryBlacklist,
@@ -436,6 +451,7 @@ export const _test = {
   resolveRandom,
   resolveTimeoutMs,
   resolveUser,
+  setSession,
   stringifyCell,
   stringifyJson,
   throwForHttpStatus,
