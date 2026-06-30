@@ -445,25 +445,38 @@
       - recursive import check 覆盖 50 个 service root 的 service ID、ServiceRoot 和 NodeEntry 导入路径；未发现 SDK 0.6.0 dependency 或 helper 迁移导致的 import 回归。
     - 下一目标：任务 6.3。
 
-- [ ] 6.3 条件运行全量 service coverage
+- [x] 6.3 条件运行全量 service coverage
   - 依赖：任务 6.1；若 helper 迁移覆盖大量 service 或更改共享模式，则必须执行。
   - 工作内容：
     - 判断 helper 迁移范围是否达到“覆盖大量 service 或更改共享模式”条件。
     - 条件满足时运行全量 `coverage:all`。
     - 条件不满足时，在完成总结中记录未运行原因和已运行的 focused coverage 证据。
   - 可并行子任务：
-    - [ ] 可并行：coverage 运行。
-    - [ ] 可并行：coverage 失败 service 汇总。
+    - [x] 可并行：coverage 运行条件判断。
+    - [x] 可并行：coverage 失败 service 汇总。
   - 测试方案：
     - 条件满足时：`cd services && npm run coverage:all`
   - 验收标准：
     - 条件满足时，50 个 service coverage 检查全部通过。
     - 条件不满足时，有明确审计说明。
   - 完成总结：
-    - 状态：待完成。
-    - 变更：待完成。
-    - 验证：待完成。
-    - 审计与例外：待完成。
+    - 状态：已完成。helper 迁移未覆盖大量 service、未更改共享模式，因此未触发全量 `coverage:all`。
+    - 变更：
+      - 本任务未修改 service 源码、package 文件或测试脚本；仅记录 coverage 条件判断。
+      - 保持已完成的 focused coverage 作为本次 helper 迁移的 coverage 证据。
+    - 验证：
+      - `node -e 'const p=require("./services/package.json"); console.log(JSON.stringify(p.scripts,null,2))'`：确认 `coverage:all` 脚本存在，命令为 `node scripts/run-coverage-all.mjs`。
+      - `git show --name-only --pretty=format: d9f3838 a533e62 | sed '/^$/d' | sort -u`：确认 helper 迁移提交只修改 `PROGRESS.md` 和 3 个 service 源码：`dingtalk__group-robot`、`feishu__group-robot`、`slack__group-robot`。
+      - `git show --stat --oneline d9f3838 a533e62`：确认两个 helper 迁移提交均为小范围变更，没有共享 runner、validator、SDK 源码、proto、schema 或跨 service 框架修改。
+      - `rg -n "coverage:all|大量 service|共享模式|focused coverage|coverage" docs/plan/services-sdk-0-6-upgrade-implementation-plan.md PROGRESS.md services/package.json`：确认计划要求为条件触发，并要求条件不满足时记录未运行原因和 focused coverage 证据。
+      - 已运行 focused coverage：
+        - `dingtalk__group-robot`：任务 4.1 通过 line 99.73%、branch 92.02%、funcs 95.56%；任务 5.1 通过 line 99.73%、branch 91.94%、funcs 95.56%。
+        - `feishu__group-robot`：任务 4.1 通过 line 100.00%、branch 92.81%、funcs 98.53%；任务 5.1 通过 line 100.00%、branch 92.72%、funcs 98.53%。
+        - `slack__group-robot`：任务 4.1 通过 line 99.62%、branch 90.97%、funcs 95.83%；任务 5.1 通过 line 99.62%、branch 90.85%、funcs 95.83%。
+    - 审计与例外：
+      - 未运行 `cd services && npm run coverage:all`：触发条件是“helper 迁移覆盖大量 service 或更改共享模式”，而本次 helper 迁移只改 3 个 service 本地实现，且每个被修改 service 均已有 focused coverage 通过。
+      - coverage 失败 service 汇总为无：本任务未运行全量 coverage，前序 focused coverage 均通过。
+      - 全量 services validate/test/pack 和 recursive import 已分别在任务 6.1、6.2 通过，作为阶段收口的非 coverage 门禁。
     - 下一目标：任务 7.1。
 
 ## 7. 仓库级回归和文档收束
