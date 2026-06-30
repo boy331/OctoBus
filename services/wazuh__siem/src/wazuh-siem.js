@@ -29,6 +29,7 @@ const tokenCacheKey = (baseUrl, username) => `${baseUrl}|${username}`;
 const grpcCodeFor = (code) => ({
   INVALID_ARGUMENT: grpcStatus.INVALID_ARGUMENT,
   FAILED_PRECONDITION: grpcStatus.FAILED_PRECONDITION,
+  UNAUTHENTICATED: grpcStatus.UNAUTHENTICATED,
   PERMISSION_DENIED: grpcStatus.PERMISSION_DENIED,
   UNAVAILABLE: grpcStatus.UNAVAILABLE,
   DEADLINE_EXCEEDED: grpcStatus.DEADLINE_EXCEEDED,
@@ -319,10 +320,14 @@ export function rpcdef(ctx) {
 
       const text = await res.text();
       if (!res.ok) {
-        if (res.status === 401 || res.status === 403) {
-          throw errorWithCode('PERMISSION_DENIED', `Wazuh authentication failed (http ${res.status}): ${text}`);
+        logFlow('authenticate:auth-error', { status: res.status, bodyLength: text?.length });
+        if (res.status === 401) {
+          throw errorWithCode('UNAUTHENTICATED', `Wazuh authentication failed: invalid credentials (${res.status})`);
         }
-        throw errorWithCode('UNAVAILABLE', `Wazuh authentication failed (http ${res.status}): ${text}`);
+        if (res.status === 403) {
+          throw errorWithCode('PERMISSION_DENIED', `Wazuh authentication forbidden (${res.status})`);
+        }
+        throw errorWithCode('UNAVAILABLE', `Wazuh authentication failed (http ${res.status})`);
       }
 
       let json;
@@ -355,6 +360,9 @@ export function rpcdef(ctx) {
       return token;
     } catch (e) {
       if (e instanceof GrpcError) throw e;
+      if (e.name === 'TimeoutError' || e.name === 'AbortError') {
+        throw errorWithCode('DEADLINE_EXCEEDED', `Wazuh authentication timeout after ${timeoutMs}ms`);
+      }
       const reason = e?.cause?.message || e?.message || 'fetch failed';
       throw errorWithCode('UNAVAILABLE', `Wazuh authentication request failed: ${reason}`);
     }
@@ -381,25 +389,35 @@ export function rpcdef(ctx) {
         ...(skipTlsVerify ? { dispatcher: getDispatcher() } : {}),
       });
     } catch (e) {
+      if (e.name === 'TimeoutError' || e.name === 'AbortError') {
+        throw errorWithCode('DEADLINE_EXCEEDED', `request timeout after ${timeoutMs}ms`);
+      }
       const reason = e?.cause?.message || e?.message || 'fetch failed';
       throw errorWithCode('UNAVAILABLE', reason);
     }
   };
 
-  const throwForHttpError = (status, text) => {
-    if (status === 401 || status === 403) {
-      throw errorWithCode('PERMISSION_DENIED', `upstream http ${status}: ${text}`);
+  const throwForHttpError = (status, text, stage = 'request') => {
+    if (status === 401) {
+      logFlow(`${stage}:auth-error`, { status, bodyLength: text?.length });
+      throw errorWithCode('UNAUTHENTICATED', `${stage} unauthorized (${status})`);
+    }
+    if (status === 403) {
+      logFlow(`${stage}:forbidden`, { status, bodyLength: text?.length });
+      throw errorWithCode('PERMISSION_DENIED', `${stage} forbidden (${status})`);
     }
     if (status >= 400 && status < 500) {
-      throw errorWithCode('FAILED_PRECONDITION', `upstream http ${status}: ${text}`);
+      logFlow(`${stage}:client-error`, { status, excerpt: String(text || '').slice(0, 256) });
+      throw errorWithCode('FAILED_PRECONDITION', `upstream http ${status}`);
     }
-    throw errorWithCode('UNAVAILABLE', `upstream http ${status}: ${text}`);
+    logFlow(`${stage}:server-error`, { status, excerpt: String(text || '').slice(0, 256) });
+    throw errorWithCode('UNAVAILABLE', `upstream http ${status}`);
   };
 
-  const readJsonResponse = async (res) => {
+  const readJsonResponse = async (res, stage = 'request') => {
     const text = await res.text();
     if (!res.ok) {
-      throwForHttpError(res.status, text);
+      throwForHttpError(res.status, text, stage);
     }
     if (!text.trim()) {
       return {};
@@ -448,7 +466,7 @@ export function rpcdef(ctx) {
       return wazuhGet(path, params, false, reqOverride);
     }
 
-    return readJsonResponse(res);
+    return readJsonResponse(res, 'wazuh-api');
   };
 
   // ─── Indexer API request (Basic Auth) ────────────────────────────
@@ -475,7 +493,7 @@ export function rpcdef(ctx) {
       body: JSON.stringify(body),
     });
 
-    return readJsonResponse(res);
+    return readJsonResponse(res, 'indexer-post');
   };
 
   const indexerGet = async (path, params = {}) => {
@@ -501,7 +519,7 @@ export function rpcdef(ctx) {
 
     const res = await fetchWithRetry(url.toString(), { method: 'GET', headers });
 
-    return readJsonResponse(res);
+    return readJsonResponse(res, 'indexer-get');
   };
 
   // ─── RPC: ListAlerts (Indexer) ───────────────────────────────────

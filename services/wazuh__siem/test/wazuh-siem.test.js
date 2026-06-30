@@ -668,7 +668,7 @@ test('authenticate fails with wrong credentials (HTTP 401)', async () => {
     bindings: { endpoint: 'http://localhost:19000' },
     secret: { username: 'bad', password: 'creds' },
   });
-  await assert.rejects(() => handler(), /PERMISSION_DENIED: Wazuh authentication failed/);
+  await assert.rejects(() => handler(), /UNAUTHENTICATED: Wazuh authentication failed: invalid credentials \(401\)/);
 });
 
 // ─── HTTP error mapping ──────────────────────────────────────
@@ -677,7 +677,7 @@ test('Indexer HTTP 403 maps to PERMISSION_DENIED', async () => {
   mockIndexerAuthFail(403, 'forbidden');
 
   const handler = await loadHandler(listAlertsPath, {}, defaultDualCtx);
-  await assert.rejects(() => handler(), /PERMISSION_DENIED: upstream http 403/);
+  await assert.rejects(() => handler(), /PERMISSION_DENIED: indexer-post forbidden \(403\)/);
 });
 
 test('Indexer HTTP 500 maps to UNAVAILABLE', async () => {
@@ -707,11 +707,48 @@ test('Network failure maps to UNAVAILABLE', async () => {
 
 // ─── Indexer Basic Auth failure ──────────────────────────────────
 
-test('Indexer auth failure (HTTP 401) maps to PERMISSION_DENIED', async () => {
+test('Indexer auth failure (HTTP 401) maps to UNAUTHENTICATED', async () => {
   mockIndexerAuthFail(401, JSON.stringify({ error: { root_cause: [{ type: 'security_exception' }] } }));
 
   const handler = await loadHandler(listAlertsPath, {}, defaultDualCtx);
-  await assert.rejects(() => handler(), /PERMISSION_DENIED: upstream http 401/);
+  await assert.rejects(() => handler(), /UNAUTHENTICATED: indexer-post unauthorized \(401\)/);
+});
+
+test('authenticate fails with HTTP 403 maps to PERMISSION_DENIED', async () => {
+  mockAuthFail(403, JSON.stringify({ title: 'Forbidden', detail: 'Access denied' }));
+
+  const handler = await loadHandler(listAgentsPath, {}, {
+    bindings: { endpoint: 'http://localhost:19000' },
+    secret: { username: 'user', password: 'pass' },
+  });
+  await assert.rejects(() => handler(), /PERMISSION_DENIED: Wazuh authentication forbidden \(403\)/);
+});
+
+test('fetch timeout maps to DEADLINE_EXCEEDED', async () => {
+  setFetch(async () => {
+    const err = new Error('The operation was aborted due to timeout');
+    err.name = 'TimeoutError';
+    throw err;
+  });
+
+  const handler = await loadHandler(listAlertsPath, {}, defaultDualCtx);
+  await assert.rejects(() => handler(), /DEADLINE_EXCEEDED: request timeout after/);
+});
+
+test('throwForHttpError does not leak upstream response body in 401/403 errors', async () => {
+  const sensitiveBody = JSON.stringify({ secret_key: 'should-not-appear', internal_ip: '10.0.0.1' });
+  mockIndexerAuthFail(401, sensitiveBody);
+
+  const handler = await loadHandler(listAlertsPath, {}, defaultDualCtx);
+  try {
+    await handler();
+    assert.fail('should have thrown');
+  } catch (err) {
+    const msg = err.message || String(err);
+    assert.match(msg, /UNAUTHENTICATED/);
+    assert.doesNotMatch(msg, /secret_key/);
+    assert.doesNotMatch(msg, /should-not-appear/);
+  }
 });
 
 // ─── SDK handler invocation ──────────────────────────────────
