@@ -253,7 +253,6 @@ const services = {
     entryFile: "../filigran__opencti/bin/opencti.js",
     serviceModule: "../filigran__opencti/src/service.js",
   },
-  },
 };
 
 const serviceNames = Object.keys(services);
