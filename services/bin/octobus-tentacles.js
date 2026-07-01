@@ -237,6 +237,10 @@ const services = {
     entryFile: "../wd__k01/bin/wd-k01.js",
     serviceModule: "../wd__k01/src/service.js",
   },
+  "cortex": {
+    entryFile: "../thehive__cortex/bin/cortex.js",
+    serviceModule: "../thehive__cortex/src/service.js",
+  },
   "tencent-bh": {
     entryFile: "../tencent__bh/bin/tencent-bh.js",
     serviceModule: "../tencent__bh/src/service.js",
